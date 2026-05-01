@@ -1,0 +1,416 @@
+/**
+ * @file pcan_backend.cpp
+ * @brief PEAK-System PCANBasic backend implementation
+ */
+
+#include "pcan_backend.h"
+
+#include <PCANBasic.h>
+
+#include <chrono>
+#include <cstring>
+#include <sstream>
+
+#ifdef _WIN32
+#  include <windows.h>
+#else
+#  include <sys/select.h>
+#  include <unistd.h>
+#endif
+
+namespace can {
+
+namespace {
+
+/// All channel handles we'll probe during enumerateAdapters().
+/// Covers USB (1..16), PCI (1..16), LAN (1..16).
+constexpr TPCANHandle kProbeHandles[] = {
+    PCAN_USBBUS1,  PCAN_USBBUS2,  PCAN_USBBUS3,  PCAN_USBBUS4,
+    PCAN_USBBUS5,  PCAN_USBBUS6,  PCAN_USBBUS7,  PCAN_USBBUS8,
+    PCAN_USBBUS9,  PCAN_USBBUS10, PCAN_USBBUS11, PCAN_USBBUS12,
+    PCAN_USBBUS13, PCAN_USBBUS14, PCAN_USBBUS15, PCAN_USBBUS16,
+    PCAN_PCIBUS1,  PCAN_PCIBUS2,  PCAN_PCIBUS3,  PCAN_PCIBUS4,
+    PCAN_PCIBUS5,  PCAN_PCIBUS6,  PCAN_PCIBUS7,  PCAN_PCIBUS8,
+    PCAN_LANBUS1,  PCAN_LANBUS2,  PCAN_LANBUS3,  PCAN_LANBUS4,
+    PCAN_LANBUS5,  PCAN_LANBUS6,  PCAN_LANBUS7,  PCAN_LANBUS8,
+};
+
+std::string handleToChannelId(TPCANHandle h) {
+    // PCAN_USBBUSn = 0x51 + (n-1), PCAN_PCIBUSn = 0x41 + (n-1),
+    // PCAN_LANBUSn = 0x801 + (n-1). Encode in a stable string the user
+    // can pass back to open(channel_id).
+    std::ostringstream oss;
+    if (h >= PCAN_USBBUS1 && h <= PCAN_USBBUS16) {
+        oss << "PCAN_USBBUS" << (h - PCAN_USBBUS1 + 1);
+    } else if (h >= PCAN_PCIBUS1 && h <= PCAN_PCIBUS8) {
+        oss << "PCAN_PCIBUS" << (h - PCAN_PCIBUS1 + 1);
+    } else if (h >= PCAN_LANBUS1 && h <= PCAN_LANBUS8) {
+        oss << "PCAN_LANBUS" << (h - PCAN_LANBUS1 + 1);
+    } else {
+        oss << "PCAN_HANDLE_0x" << std::hex << h;
+    }
+    return oss.str();
+}
+
+TPCANHandle channelIdToHandle(const std::string& id) {
+    auto starts_with = [&](const char* s) {
+        return id.compare(0, std::strlen(s), s) == 0;
+    };
+    auto idx = [&](const char* prefix) -> int {
+        try { return std::stoi(id.substr(std::strlen(prefix))); }
+        catch (...) { return 0; }
+    };
+    if (starts_with("PCAN_USBBUS")) {
+        int n = idx("PCAN_USBBUS");
+        if (n >= 1 && n <= 16) return PCAN_USBBUS1 + (n - 1);
+    } else if (starts_with("PCAN_PCIBUS")) {
+        int n = idx("PCAN_PCIBUS");
+        if (n >= 1 && n <= 8) return PCAN_PCIBUS1 + (n - 1);
+    } else if (starts_with("PCAN_LANBUS")) {
+        int n = idx("PCAN_LANBUS");
+        if (n >= 1 && n <= 8) return PCAN_LANBUS1 + (n - 1);
+    }
+    return 0;
+}
+
+std::string pcanErrorText(TPCANStatus status) {
+    char buf[256] = {0};
+    if (CAN_GetErrorText(status, 0x09 /* PCAN_LANGUAGE_ENGLISH */, buf) == PCAN_ERROR_OK) {
+        return std::string(buf);
+    }
+    std::ostringstream oss;
+    oss << "PCAN status 0x" << std::hex << status;
+    return oss.str();
+}
+
+std::string pcanStringValue(TPCANHandle h, TPCANParameter param) {
+    char buf[256] = {0};
+    if (CAN_GetValue(h, param, buf, sizeof(buf)) == PCAN_ERROR_OK) {
+        return std::string(buf);
+    }
+    return {};
+}
+
+uint32_t pcanDwordValue(TPCANHandle h, TPCANParameter param) {
+    DWORD v = 0;
+    if (CAN_GetValue(h, param, &v, sizeof(v)) == PCAN_ERROR_OK) {
+        return static_cast<uint32_t>(v);
+    }
+    return 0;
+}
+
+} // namespace
+
+PcanBackend::PcanBackend() = default;
+
+PcanBackend::~PcanBackend() {
+    PcanBackend::close();
+}
+
+BackendCapabilities PcanBackend::capabilities() const {
+    BackendCapabilities caps;
+    caps.supports_can_fd = true;
+    caps.supports_listen_only = true;
+    caps.supports_loopback = false; // not exposed via PCANBasic in a portable way
+    caps.supports_receive_own = false;
+    caps.supports_acceptance_filters = true;
+    caps.exposes_error_counters = false; // PCAN status flags only, not raw counters
+    caps.exposes_bus_load = true;        // via PCAN_BUSSPEED_NOMINAL? Not directly; computed at higher layer.
+    caps.exposes_firmware_version = true;
+    caps.exposes_serial_number = true;
+#ifdef _WIN32
+    caps.exposes_receive_fd = false;
+#else
+    caps.exposes_receive_fd = true;
+#endif
+    return caps;
+}
+
+bool PcanBackend::mapBitrate(uint32_t bps, uint16_t& out) {
+    switch (bps) {
+        case 1000000: out = PCAN_BAUD_1M;   return true;
+        case 800000:  out = PCAN_BAUD_800K; return true;
+        case 500000:  out = PCAN_BAUD_500K; return true;
+        case 250000:  out = PCAN_BAUD_250K; return true;
+        case 125000:  out = PCAN_BAUD_125K; return true;
+        case 100000:  out = PCAN_BAUD_100K; return true;
+        case 95000:   out = PCAN_BAUD_95K;  return true;
+        case 83000:   out = PCAN_BAUD_83K;  return true;
+        case 50000:   out = PCAN_BAUD_50K;  return true;
+        case 47000:   out = PCAN_BAUD_47K;  return true;
+        case 33000:   out = PCAN_BAUD_33K;  return true;
+        case 20000:   out = PCAN_BAUD_20K;  return true;
+        case 10000:   out = PCAN_BAUD_10K;  return true;
+        case 5000:    out = PCAN_BAUD_5K;   return true;
+        default: return false;
+    }
+}
+
+AdapterInfo PcanBackend::buildAdapterInfo(uint16_t handle) {
+    AdapterInfo a;
+    a.backend = BackendKind::PcanBasic;
+    a.channel_id = handleToChannelId(handle);
+    a.channel_index = handle;
+    a.device_name = pcanStringValue(handle, PCAN_HARDWARE_NAME);
+    if (a.device_name.empty()) a.device_name = a.channel_id;
+    a.firmware_version = pcanStringValue(handle, PCAN_CHANNEL_VERSION);
+    a.driver_version = pcanStringValue(handle, PCAN_API_VERSION);
+    a.hardware_part_number = pcanStringValue(handle, PCAN_DEVICE_PART_NUMBER);
+
+    DWORD device_id = pcanDwordValue(handle, PCAN_DEVICE_ID);
+    if (device_id != 0) {
+        std::ostringstream oss;
+        oss << device_id;
+        a.serial_number = oss.str();
+    }
+
+    DWORD condition = pcanDwordValue(handle, PCAN_CHANNEL_CONDITION);
+    if (condition == PCAN_CHANNEL_AVAILABLE) {
+        a.extra["condition"] = "available";
+    } else if (condition == PCAN_CHANNEL_OCCUPIED) {
+        a.extra["condition"] = "occupied";
+    } else if (condition == PCAN_CHANNEL_PCANVIEW) {
+        a.extra["condition"] = "in-use-by-pcanview";
+    } else {
+        a.extra["condition"] = "unavailable";
+    }
+    return a;
+}
+
+std::vector<AdapterInfo> PcanBackend::enumerateAdapters() {
+    std::vector<AdapterInfo> result;
+    for (TPCANHandle h : kProbeHandles) {
+        DWORD condition = pcanDwordValue(h, PCAN_CHANNEL_CONDITION);
+        if (condition == PCAN_CHANNEL_UNAVAILABLE) continue;
+        result.push_back(buildAdapterInfo(h));
+    }
+    return result;
+}
+
+bool PcanBackend::open(const ChannelConfig& cfg) {
+    if (channel_handle_ != 0) {
+        recordError("PCAN backend already open");
+        return false;
+    }
+
+    TPCANHandle h = channelIdToHandle(cfg.channel_id);
+    if (h == 0) {
+        recordError("Unknown PCAN channel: " + cfg.channel_id);
+        return false;
+    }
+
+    TPCANStatus st;
+    if (cfg.data_bitrate > 0) {
+        // CAN-FD: build a bitrate FD string like "f_clock=80000000, nom_brp=10, nom_tseg1=12, ..."
+        // Caller is expected to pass a valid string in cfg.extra["pcan_fd_bitrate"];
+        // we do not auto-derive timing parameters here.
+        recordError("CAN-FD requires explicit timing string; not implemented yet");
+        return false;
+    }
+
+    uint16_t btr0btr1;
+    if (!mapBitrate(cfg.bitrate, btr0btr1)) {
+        recordError("Unsupported bitrate for PCAN: " + std::to_string(cfg.bitrate));
+        return false;
+    }
+
+    st = CAN_Initialize(h, btr0btr1, 0, 0, 0);
+    if (st != PCAN_ERROR_OK) {
+        recordPcanError("CAN_Initialize", st);
+        return false;
+    }
+
+    // Listen-only mode if requested.
+    if (cfg.listen_only) {
+        DWORD on = PCAN_PARAMETER_ON;
+        st = CAN_SetValue(h, PCAN_LISTEN_ONLY, &on, sizeof(on));
+        if (st != PCAN_ERROR_OK) {
+            recordPcanError("CAN_SetValue(LISTEN_ONLY)", st);
+            CAN_Uninitialize(h);
+            return false;
+        }
+    }
+
+    channel_handle_ = h;
+    config_ = cfg;
+    info_ = buildAdapterInfo(h);
+
+#ifdef _WIN32
+    // Windows: retrieve the auto-reset Win32 event HANDLE that PCANBasic
+    // signals when frames arrive, then wait on it with WaitForSingleObject.
+    // This is the event-driven path — no polling.
+    HANDLE evt = nullptr;
+    if (CAN_GetValue(h, PCAN_RECEIVE_EVENT, &evt, sizeof(evt)) == PCAN_ERROR_OK) {
+        receive_handle_ = evt;
+    } else {
+        receive_handle_ = nullptr;
+    }
+#else
+    // Linux: retrieve the receive event fd so callers (and select()) can
+    // wait without polling.
+    int fd = -1;
+    if (CAN_GetValue(h, PCAN_RECEIVE_EVENT, &fd, sizeof(fd)) == PCAN_ERROR_OK) {
+        receive_fd_ = fd;
+    } else {
+        receive_fd_ = -1;
+    }
+#endif
+
+    return true;
+}
+
+void PcanBackend::close() {
+    if (channel_handle_ != 0) {
+        CAN_Uninitialize(channel_handle_);
+        channel_handle_ = 0;
+    }
+    receive_fd_ = -1;
+    receive_handle_ = nullptr;
+}
+
+bool PcanBackend::send(const Frame& frame) {
+    if (channel_handle_ == 0) {
+        recordError("send() on closed PCAN backend");
+        return false;
+    }
+
+    TPCANMsg msg;
+    std::memset(&msg, 0, sizeof(msg));
+    msg.ID = frame.id;
+    msg.MSGTYPE = frame.is_extended_id ? PCAN_MESSAGE_EXTENDED : PCAN_MESSAGE_STANDARD;
+    if (frame.is_remote_frame) msg.MSGTYPE |= PCAN_MESSAGE_RTR;
+    msg.LEN = frame.dlc > 8 ? 8 : frame.dlc;
+    std::memcpy(msg.DATA, frame.data, msg.LEN);
+
+    TPCANStatus st = CAN_Write(channel_handle_, &msg);
+    if (st != PCAN_ERROR_OK) {
+        recordPcanError("CAN_Write", st);
+        return false;
+    }
+    return true;
+}
+
+bool PcanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
+    if (channel_handle_ == 0) return false;
+
+    // Block on the platform-native event primitive. No polling.
+#ifdef _WIN32
+    if (receive_handle_ && timeout.count() > 0) {
+        DWORD ms = timeout.count() > 0xFFFFFFFF ? INFINITE : static_cast<DWORD>(timeout.count());
+        DWORD r = WaitForSingleObject(static_cast<HANDLE>(receive_handle_), ms);
+        if (r == WAIT_TIMEOUT) return false;
+        if (r != WAIT_OBJECT_0) {
+            recordError("WaitForSingleObject failed");
+            return false;
+        }
+    } else if (!receive_handle_) {
+        // No event handle was retrieved at open(). The driver normally
+        // provides one; falling through here means we'd have to poll,
+        // which we explicitly refuse to do. Bail.
+        recordError("PCAN_RECEIVE_EVENT unavailable; refusing to poll");
+        return false;
+    }
+#else
+    if (receive_fd_ >= 0 && timeout.count() > 0) {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(receive_fd_, &rfds);
+        timeval tv;
+        tv.tv_sec = timeout.count() / 1000;
+        tv.tv_usec = (timeout.count() % 1000) * 1000;
+        int sel = ::select(receive_fd_ + 1, &rfds, nullptr, nullptr, &tv);
+        if (sel <= 0) return false;
+    } else if (receive_fd_ < 0) {
+        recordError("PCAN_RECEIVE_EVENT unavailable; refusing to poll");
+        return false;
+    }
+#endif
+
+    // The event fired (or signalled) — drain one frame. CAN_Read may
+    // return QRCVEMPTY in the (rare) case where another consumer drained
+    // the queue between event signal and our read; that's not a poll,
+    // it's a single check, return false and let the worker loop's next
+    // iteration wait on the event again.
+    TPCANMsg msg;
+    TPCANTimestamp ts;
+    TPCANStatus st = CAN_Read(channel_handle_, &msg, &ts);
+    if (st == PCAN_ERROR_OK) {
+        frame.id = msg.ID;
+        frame.dlc = msg.LEN;
+        std::memcpy(frame.data, msg.DATA, msg.LEN > 8 ? 8 : msg.LEN);
+        uint64_t pcan_us = static_cast<uint64_t>(ts.millis_overflow) * 1000000000ULL
+                         + static_cast<uint64_t>(ts.millis) * 1000ULL
+                         + static_cast<uint64_t>(ts.micros);
+        frame.timestamp_us = pcan_us;
+        frame.is_extended_id = (msg.MSGTYPE & PCAN_MESSAGE_EXTENDED) != 0;
+        frame.is_remote_frame = (msg.MSGTYPE & PCAN_MESSAGE_RTR) != 0;
+        frame.is_error_frame = (msg.MSGTYPE & PCAN_MESSAGE_ERRFRAME) != 0;
+        frame.is_fd_frame = (msg.MSGTYPE & PCAN_MESSAGE_FD) != 0;
+        return true;
+    }
+    if (st == PCAN_ERROR_QRCVEMPTY) {
+        return false;
+    }
+    if (st & PCAN_ERROR_QOVERRUN) {
+        rx_overruns_.fetch_add(1);
+    }
+    recordPcanError("CAN_Read", st);
+    return false;
+}
+
+int PcanBackend::receiveFd() const {
+    return receive_fd_;
+}
+
+ChannelStatus PcanBackend::status() const {
+    ChannelStatus s;
+    s.bus_load_percent = -1.0;
+    s.rx_queue_overruns = rx_overruns_.load();
+
+    if (channel_handle_ == 0) {
+        s.bus_state = BusState::Unknown;
+        return s;
+    }
+
+    TPCANStatus st = CAN_GetStatus(channel_handle_);
+    if (st == PCAN_ERROR_OK) {
+        s.bus_state = BusState::ErrorActive;
+    } else if (st & PCAN_ERROR_BUSPASSIVE) {
+        s.bus_state = BusState::ErrorPassive;
+    } else if (st & PCAN_ERROR_BUSWARNING) {
+        s.bus_state = BusState::ErrorWarning;
+    } else if (st & PCAN_ERROR_BUSOFF) {
+        s.bus_state = BusState::BusOff;
+    } else {
+        s.bus_state = BusState::Unknown;
+    }
+    s.bus_errors = (st & PCAN_ERROR_ANYBUSERR) ? 1 : 0;
+
+    return s;
+}
+
+AdapterInfo PcanBackend::info() const {
+    if (channel_handle_ == 0) return info_;
+    // Refresh dynamic fields each call.
+    return buildAdapterInfo(channel_handle_);
+}
+
+std::string PcanBackend::lastError() const {
+    std::lock_guard<std::mutex> lock(error_mutex_);
+    return last_error_;
+}
+
+void PcanBackend::recordError(const std::string& msg) {
+    std::lock_guard<std::mutex> lock(error_mutex_);
+    last_error_ = msg;
+}
+
+void PcanBackend::recordPcanError(const std::string& context, uint32_t pcan_status) {
+    recordError(context + ": " + pcanErrorText(static_cast<TPCANStatus>(pcan_status)));
+}
+
+std::unique_ptr<ICanBackend> createPcanBackend() {
+    return std::unique_ptr<ICanBackend>(new PcanBackend());
+}
+
+} // namespace can
