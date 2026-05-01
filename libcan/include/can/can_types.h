@@ -13,6 +13,8 @@
 #define CAN_TYPES_H
 
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 
 namespace can {
@@ -108,20 +110,40 @@ inline bool isExtId(uint32_t id) {
 }
 
 /**
- * @brief Get bitrate in bits per second
- * @param bitrate String representation (e.g., "500k", "1M")
- * @return Bitrate value or 0 on error
- *
- * Supports formats: "125k", "250k", "500k", "1M", "1000000"
+ * @brief Parse a bitrate string into bits per second.
+ * @param bitrate "125k", "500K", "1M", "1000000", etc.
+ * @return Bitrate in bps, or 0 if the string can't be parsed.
  */
-uint32_t parseBitrate(const std::string& bitrate);
+inline uint32_t parseBitrate(const std::string& bitrate) {
+    if (bitrate.empty()) return 0;
+    char* end = nullptr;
+    double v = std::strtod(bitrate.c_str(), &end);
+    if (end == bitrate.c_str()) return 0;
+    while (*end == ' ') ++end;
+    if (*end == 'k' || *end == 'K') v *= 1000.0;
+    else if (*end == 'M' || *end == 'm') v *= 1'000'000.0;
+    return v < 0 ? 0 : static_cast<uint32_t>(v);
+}
 
 /**
- * @brief Format bitrate as human-readable string
- * @param bitrate Bitrate in bits per second
- * @return Formatted string (e.g., "500 kbps", "1 Mbps")
+ * @brief Format a bitrate as a human-readable string.
+ * @param bitrate Bitrate in bits per second.
+ * @return e.g. "500 kbps", "1 Mbps", "750 bps".
  */
-std::string formatBitrate(uint32_t bitrate);
+inline std::string formatBitrate(uint32_t bitrate) {
+    if (bitrate >= 1'000'000) {
+        if (bitrate % 1'000'000 == 0) {
+            return std::to_string(bitrate / 1'000'000) + " Mbps";
+        }
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.3g Mbps", bitrate / 1'000'000.0);
+        return buf;
+    }
+    if (bitrate >= 1000) {
+        return std::to_string(bitrate / 1000) + " kbps";
+    }
+    return std::to_string(bitrate) + " bps";
+}
 
 } // namespace can
 
