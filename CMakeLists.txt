@@ -70,7 +70,83 @@ endif()
 
 # Add subdirectories
 add_subdirectory(libcan)
-add_subdirectory(libdbc)
+
+# ----------------------------------------------------------------------------
+# Vendored Vector_DBC / Vector_BLF / Vector_ASC submodules
+# ----------------------------------------------------------------------------
+# Tobias Lorenz's libraries (GPL-3.0). We pin via git submodules at
+# third_party/. Force their internal options off so they don't drag in
+# Doxygen/static-analysis tooling we don't want, and stop their tests
+# from registering with our ctest.
+set(OPTION_RUN_DOXYGEN     OFF CACHE BOOL "" FORCE)
+set(OPTION_RUN_CCCC        OFF CACHE BOOL "" FORCE)
+set(OPTION_RUN_CPPCHECK    OFF CACHE BOOL "" FORCE)
+set(OPTION_BUILD_EXAMPLES  OFF CACHE BOOL "" FORCE)
+set(OPTION_BUILD_TESTS     OFF CACHE BOOL "" FORCE)
+set(OPTION_USE_GCOV        OFF CACHE BOOL "" FORCE)
+set(OPTION_USE_GPROF       OFF CACHE BOOL "" FORCE)
+set(OPTION_ADD_LCOV        OFF CACHE BOOL "" FORCE)
+
+# Each submodule's CMakeLists writes `set(CMAKE_BUILD_TYPE Release)` at
+# the top — that's a non-cache local set, so it doesn't actually clobber
+# our cached value. We rely on that subtlety; if a future Toby release
+# strengthens that to FORCE we'll need to wrap the add_subdirectory.
+
+option(CANLIB_USE_VECTOR_DBC "Build/expose third_party Vector_DBC" ON)
+option(CANLIB_USE_VECTOR_BLF "Build/expose third_party Vector_BLF" ON)
+option(CANLIB_USE_VECTOR_ASC "Build/expose third_party Vector_ASC" ON)
+
+# Helper: each Toby submodule's CMakeLists references ${CMAKE_SOURCE_DIR}/src
+# expecting to be built standalone. When consumed via add_subdirectory that
+# resolves to *our* source tree. Patch the include dirs after the fact so
+# consumers see the right paths. SYSTEM suppresses pedantic warnings from
+# their headers leaking into our builds.
+function(_canlib_fix_toby_includes target subdir)
+    target_include_directories(${target} SYSTEM PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/${subdir}/src>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/third_party/${subdir}/src>
+    )
+endfunction()
+
+if(CANLIB_USE_VECTOR_DBC)
+    if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/Vector_DBC/CMakeLists.txt)
+        message(FATAL_ERROR "Vector_DBC submodule not initialized. Run: "
+            "git submodule update --init --recursive")
+    endif()
+    add_subdirectory(third_party/Vector_DBC EXCLUDE_FROM_ALL)
+    _canlib_fix_toby_includes(Vector_DBC Vector_DBC)
+    # Re-export with our namespace prefix so consumers refer to a stable
+    # alias instead of the upstream's bare target name.
+    add_library(CanLibraries::dbc ALIAS Vector_DBC)
+endif()
+
+if(CANLIB_USE_VECTOR_BLF)
+    if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/Vector_BLF/CMakeLists.txt)
+        message(FATAL_ERROR "Vector_BLF submodule not initialized.")
+    endif()
+    add_subdirectory(third_party/Vector_BLF EXCLUDE_FROM_ALL)
+    _canlib_fix_toby_includes(Vector_BLF Vector_BLF)
+    # Vector_BLF v2.4.2 sources use <cstdint> typedefs (uint8_t, etc.)
+    # without explicitly including the header. Modern libstdc++ no
+    # longer pulls <cstdint> in transitively, so the build fails.
+    # Force-include it on every TU as a workaround until upstream
+    # ships the fix. -include is a GCC/Clang flag.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(Vector_BLF PRIVATE -include cstdint)
+        target_compile_options(Vector_BLF PUBLIC  -include cstdint)
+    endif()
+    set_target_properties(Vector_BLF PROPERTIES CXX_STANDARD 17)
+    add_library(CanLibraries::blf ALIAS Vector_BLF)
+endif()
+
+if(CANLIB_USE_VECTOR_ASC)
+    if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/Vector_ASC/CMakeLists.txt)
+        message(FATAL_ERROR "Vector_ASC submodule not initialized.")
+    endif()
+    add_subdirectory(third_party/Vector_ASC EXCLUDE_FROM_ALL)
+    _canlib_fix_toby_includes(Vector_ASC Vector_ASC)
+    add_library(CanLibraries::asc ALIAS Vector_ASC)
+endif()
 
 # Examples — opt out when consumed downstream.
 if(CANLIB_BUILD_EXAMPLES)

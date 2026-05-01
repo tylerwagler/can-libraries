@@ -4,7 +4,7 @@ C++23 libraries for CAN communication, used by Crane's Qt application
 template (`Qt_Template`) and intended for direct use by any non-Qt
 consumer that needs a vendor-agnostic CAN abstraction.
 
-Two libraries:
+Components:
 
 - **libcan** — `can::ICanBackend`, an event-driven, vendor-neutral CAN
   driver interface. Implementations:
@@ -16,10 +16,13 @@ Two libraries:
   - `KvaserBackend` (Linux + Windows) — Kvaser canlib
   - `VectorBackend` — placeholder; lands when Vector hardware is on hand
 
-- **libdbc** — DBC file parser. Decodes raw frames to named, scaled
-  signals using Vector's `.dbc` database format. Independent of libcan;
-  apps can use either, both, or neither. (Note: `test_dbc_parser` has
-  pre-existing failing assertions; libdbc isn't yet trustworthy.)
+- **Vendored Tobias Lorenz libraries** (GPL-3.0, git submodules under
+  `third_party/`):
+  - **Vector_DBC** — DBC file parser. Re-exported as `CanLibraries::dbc`.
+  - **Vector_BLF** — Vector binary log format. Re-exported as `CanLibraries::blf`.
+  - **Vector_ASC** — Vector ASCII log format. Re-exported as `CanLibraries::asc`.
+
+  Initialize after cloning: `git submodule update --init --recursive`.
 
 ## Layout
 
@@ -42,7 +45,10 @@ can-libraries/
 │   │       ├── pcan_backend.{h,cpp}
 │   │       └── kvaser_backend.{h,cpp}
 │   └── test/test_backend.cpp
-├── libdbc/  (separate, see libdbc/include/dbc/dbc_parser.h)
+├── third_party/
+│   ├── Vector_DBC/    (submodule — bitbucket.org/tobylorenz/vector_dbc)
+│   ├── Vector_BLF/    (submodule — bitbucket.org/tobylorenz/vector_blf)
+│   └── Vector_ASC/    (submodule — bitbucket.org/tobylorenz/vector_asc)
 └── examples/
     ├── backend_example.cpp
     └── dbc_example.cpp
@@ -50,16 +56,23 @@ can-libraries/
 
 ## Building
 
-Requirements: CMake ≥ 3.25, a C++23 compiler, pthreads. The SocketCAN
-backend additionally requires Linux kernel headers; the PCAN and Kvaser
-backends require their respective vendor SDKs to be installed.
+Requirements:
+- CMake ≥ 3.25, a C++23 compiler, pthreads
+- `flex` + `bison ≥ 3.3` (Vector_DBC and Vector_ASC use generated parsers)
+- `zlib` (Vector_BLF compresses log streams)
+- Linux kernel headers (SocketCAN backend)
+- Optional vendor SDKs (PCAN, Kvaser, Vector XL — see backend options below)
 
 ```sh
+git clone <repo>
+cd can-libraries
+git submodule update --init --recursive   # pulls in Vector_DBC/BLF/ASC
 mkdir build && cd build
 cmake ..              # SocketCAN-only on Linux by default
 cmake --build .
 ctest                 # unit tests
 ./bin/backend_example # exercises the abstraction
+./bin/dbc_example my.dbc  # exercises Vector_DBC
 ```
 
 ### Backend options

@@ -1,0 +1,9 @@
+[submodule "third_party/Vector_DBC"]
+	path = third_party/Vector_DBC
+	url = https://bitbucket.org/tobylorenz/vector_dbc.git
+[submodule "third_party/Vector_BLF"]
+	path = third_party/Vector_BLF
+	url = https://bitbucket.org/tobylorenz/vector_blf.git
+[submodule "third_party/Vector_ASC"]
+	path = third_party/Vector_ASC
+	url = https://bitbucket.org/tobylorenz/vector_asc.git
