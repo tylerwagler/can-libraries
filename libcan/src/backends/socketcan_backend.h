@@ -1,6 +1,9 @@
 /**
  * @file socketcan_backend.h
  * @brief Linux SocketCAN backend implementation
+ *
+ * @copyright Copyright (c) 2026 Elytron Defense
+ * @license GPL-3.0-or-later
  */
 
 #ifndef CAN_SOCKETCAN_BACKEND_H

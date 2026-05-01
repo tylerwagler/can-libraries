@@ -5,6 +5,9 @@
  * Cross-platform CAN backend wrapping Kvaser's canlib API. Works with
  * any Kvaser USB / PCI / virtual interface that the installed canlib
  * supports.
+ *
+ * @copyright Copyright (c) 2026 Elytron Defense
+ * @license GPL-3.0-or-later
  */
 
 #ifndef CAN_KVASER_BACKEND_H

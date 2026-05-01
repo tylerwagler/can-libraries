@@ -121,4 +121,9 @@ and Windows so the export surface is consistent across platforms.
 
 ## License
 
-MIT (see source headers).
+GPL-3.0-or-later. See `LICENSE`.
+
+This library is published under the GNU General Public License v3 to align
+with the licensing of upstream tooling we depend on (e.g. Tobias Lorenz's
+`Vector_DBC` for DBC parsing, used by openSYDE). Apps that link against
+`libcan` must also be GPL-compatible.

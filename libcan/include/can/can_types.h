@@ -3,7 +3,7 @@
  * @brief Common constants and helpers for CAN identifier / bitrate handling
  *
  * @copyright Copyright (c) 2026 Elytron Defense
- * @license MIT License
+ * @license GPL-3.0-or-later
  */
 
 #ifndef CAN_TYPES_H

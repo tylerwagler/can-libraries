@@ -8,7 +8,7 @@
  * vcan0 (see backend_example).
  *
  * @copyright Copyright (c) 2026 Elytron Defense
- * @license MIT License
+ * @license GPL-3.0-or-later
  */
 
 #include "can/i_can_backend.h"

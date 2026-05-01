@@ -3,7 +3,7 @@
  * @brief CAN frame data structure
  *
  * @copyright Copyright (c) 2026 Elytron Defense
- * @license MIT License
+ * @license GPL-3.0-or-later
  */
 
 #ifndef CAN_FRAME_H

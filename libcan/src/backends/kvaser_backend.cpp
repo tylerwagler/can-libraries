@@ -1,6 +1,9 @@
 /**
  * @file kvaser_backend.cpp
  * @brief Kvaser canlib backend implementation
+ *
+ * @copyright Copyright (c) 2026 Elytron Defense
+ * @license GPL-3.0-or-later
  */
 
 #include "kvaser_backend.h"

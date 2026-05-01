@@ -10,7 +10,7 @@
  * otherwise unaware of which driver is in use.
  *
  * @copyright Copyright (c) 2026 Elytron Defense
- * @license MIT License
+ * @license GPL-3.0-or-later
  */
 
 #ifndef CAN_I_CAN_BACKEND_H

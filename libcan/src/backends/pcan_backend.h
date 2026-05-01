@@ -4,6 +4,9 @@
  *
  * Cross-platform CAN backend wrapping PEAK-System's PCANBasic API. Works
  * with PCAN-USB, PCAN-USB FD, PCAN-USB Pro, PCAN-PCI, PCAN-LAN, etc.
+ *
+ * @copyright Copyright (c) 2026 Elytron Defense
+ * @license GPL-3.0-or-later
  */
 
 #ifndef CAN_PCAN_BACKEND_H

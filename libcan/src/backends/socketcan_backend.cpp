@@ -1,6 +1,9 @@
 /**
  * @file socketcan_backend.cpp
  * @brief Linux SocketCAN backend implementation
+ *
+ * @copyright Copyright (c) 2026 Elytron Defense
+ * @license GPL-3.0-or-later
  */
 
 #include "socketcan_backend.h"

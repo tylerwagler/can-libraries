@@ -1,6 +1,9 @@
 /**
  * @file i_can_backend.cpp
  * @brief Backend factory and helpers
+ *
+ * @copyright Copyright (c) 2026 Elytron Defense
+ * @license GPL-3.0-or-later
  */
 
 #include "can/i_can_backend.h"

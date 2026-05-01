@@ -6,7 +6,7 @@
  * frame encoding/decoding capabilities.
  *
  * @copyright Copyright (c) 2026 Elytron Defense
- * @license MIT License
+ * @license GPL-3.0-or-later
  */
 
 #include "dbc/dbc_parser.h"

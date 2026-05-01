@@ -6,7 +6,7 @@
  * the standard format for describing CAN message and signal definitions.
  *
  * @copyright Copyright (c) 2026 Elytron Defense
- * @license MIT License
+ * @license GPL-3.0-or-later
  */
 
 #ifndef DBC_PARSER_H
