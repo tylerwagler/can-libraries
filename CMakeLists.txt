@@ -62,14 +62,15 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# Add subdirectories
-add_subdirectory(libcan)
-add_subdirectory(libdbc)
-
-# Testing - tests are in each library's directory
+# Testing — call enable_testing() BEFORE add_subdirectory so tests added
+# in subdirs register with ctest.
 if(BUILD_TESTING)
     enable_testing()
 endif()
+
+# Add subdirectories
+add_subdirectory(libcan)
+add_subdirectory(libdbc)
 
 # Examples — opt out when consumed downstream.
 if(CANLIB_BUILD_EXAMPLES)

@@ -5,7 +5,7 @@
  * Provides parsing and decoding capabilities for DBC files,
  * the standard format for describing CAN message and signal definitions.
  *
- * @copyright Copyright (c) 2024 AVL Test Equipment
+ * @copyright Copyright (c) 2026 Elytron Defense
  * @license MIT License
  */
 

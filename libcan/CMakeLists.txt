@@ -7,7 +7,6 @@ cmake_minimum_required(VERSION 3.25)
 # Source files
 # ----------------------------------------------------------------------------
 set(LIBCAN_SOURCES
-    src/can_interface.cpp
     src/i_can_backend.cpp
 )
 
@@ -107,9 +106,8 @@ if(CANLIB_INSTALL)
     )
 
     install(FILES
-        include/can/can_interface.h
+        include/can/frame.h
         include/can/can_types.h
-        include/can/can_errors.h
         include/can/i_can_backend.h
         ${CMAKE_CURRENT_BINARY_DIR}/include/can/libcan_export.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/can
@@ -120,9 +118,9 @@ endif()
 # Tests
 # ----------------------------------------------------------------------------
 if(BUILD_TESTING)
-    add_executable(test_can_interface test/test_can_interface.cpp)
-    target_link_libraries(test_can_interface PRIVATE libcan)
-    target_compile_features(test_can_interface PRIVATE cxx_std_17)
+    add_executable(test_backend test/test_backend.cpp)
+    target_link_libraries(test_backend PRIVATE libcan)
+    target_compile_features(test_backend PRIVATE cxx_std_23)
 
-    add_test(NAME CanInterfaceTest COMMAND test_can_interface)
+    add_test(NAME BackendTest COMMAND test_backend)
 endif()

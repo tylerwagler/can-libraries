@@ -6,17 +6,17 @@
  * (SocketCAN, PCANBasic, Kvaser canlib, Vector XL Driver Library).
  *
  * The backend layer is the lowest-level abstraction in libcan. Higher-level
- * code (can::Interface, Qt CanIoWorker) holds a unique_ptr<ICanBackend> and
- * is otherwise unaware of which driver is in use.
+ * code (Qt CanIoWorker, app code) holds a unique_ptr<ICanBackend> and is
+ * otherwise unaware of which driver is in use.
  *
- * @copyright Copyright (c) 2026 Crane / Elytron Communications
+ * @copyright Copyright (c) 2026 Elytron Defense
  * @license MIT License
  */
 
 #ifndef CAN_I_CAN_BACKEND_H
 #define CAN_I_CAN_BACKEND_H
 
-#include "can/can_interface.h"
+#include "can/frame.h"
 #include "can/libcan_export.h"
 
 #include <chrono>

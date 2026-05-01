@@ -5,7 +5,7 @@
  * Implements parsing of DBC (CAN Database) files and provides
  * frame encoding/decoding capabilities.
  *
- * @copyright Copyright (c) 2024 AVL Test Equipment
+ * @copyright Copyright (c) 2026 Elytron Defense
  * @license MIT License
  */
 
