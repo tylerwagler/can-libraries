@@ -90,7 +90,14 @@ if(CAN_BACKEND_VECTOR)
     target_link_libraries(libcan PRIVATE VectorXL::VectorXL)
 endif()
 
-target_compile_features(libcan PUBLIC cxx_std_23)
+# Internal libcan code uses C++23 features (digit separators, designated initializers, etc.).
+# Public headers stay at C++14 minimum so consumers can choose their own standard — propagating
+# cxx_std_23 PUBLIC pulled <stdfloat>'s std::float64_t into older consumers (openSYDE) that
+# expect their own global float64_t typedef from stwtypes.hpp.
+target_compile_features(libcan
+    PRIVATE cxx_std_23
+    INTERFACE cxx_std_14
+)
 
 # ----------------------------------------------------------------------------
 # Installation
