@@ -33,6 +33,44 @@ inline bool isValidDlc(uint8_t dlc) {
     return dlc <= MAX_CAN_DLC;
 }
 
+/// True if a byte-count length is in range for a CAN-FD frame.
+/// CAN-FD permits 0..8, 12, 16, 20, 24, 32, 48, 64; other values
+/// above 8 are not encodable in the on-wire 4-bit DLC field.
+inline bool isValidFdLength(uint8_t length) {
+    if (length <= 8) return true;
+    switch (length) {
+        case 12: case 16: case 20: case 24:
+        case 32: case 48: case 64:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/// Decode the on-wire 4-bit CAN-FD DLC into a byte-count length.
+/// For codes 0..8 the length equals the code; codes 9..15 expand to
+/// 12, 16, 20, 24, 32, 48, 64. Codes >15 return 0.
+inline uint8_t fdDlcToLength(uint8_t fd_dlc) {
+    static constexpr uint8_t kLut[16] = {
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64
+    };
+    return fd_dlc < 16 ? kLut[fd_dlc] : 0;
+}
+
+/// Encode a CAN-FD byte-count length as the on-wire 4-bit DLC code.
+/// Invalid lengths (9..11, 13..15, 17..19, etc.) round up to the
+/// next valid length. Lengths above 64 saturate to 64.
+inline uint8_t lengthToFdDlc(uint8_t length) {
+    if (length <= 8) return length;
+    if (length <= 12) return 9;
+    if (length <= 16) return 10;
+    if (length <= 20) return 11;
+    if (length <= 24) return 12;
+    if (length <= 32) return 13;
+    if (length <= 48) return 14;
+    return 15;
+}
+
 /// True if id fits in an 11-bit standard CAN identifier.
 inline bool isStdId(uint32_t id) {
     return (id & ~CAN_STD_ID_MASK) == 0;

@@ -12,6 +12,7 @@
 #include "can/i_can_backend.h"
 
 #include <atomic>
+#include <deque>
 #include <mutex>
 #include <string>
 
@@ -44,12 +45,30 @@ private:
     void recordError(const std::string& msg);
     void updateStateFromErrorFrame(uint32_t can_id, const uint8_t* data, uint8_t dlc);
 
+    /// Tracks a frame we just sent so the matching kernel echo (delivered
+    /// when CAN_RAW_RECV_OWN_MSGS is enabled) can be tagged with is_tx=true
+    /// downstream. Entries expire after a short window to bound memory.
+    struct RecentTx {
+        uint32_t id;
+        uint8_t  dlc;
+        bool     is_fd;
+        uint64_t payload_hash;
+        uint64_t deadline_us;
+    };
+
+    void pushRecentTx(const Frame& frame);
+    bool consumeRecentTx(const Frame& frame);
+
     int socket_fd_ = -1;
+    bool fd_enabled_ = false;
     ChannelConfig config_;
     AdapterInfo info_;
 
     mutable std::mutex error_mutex_;
     std::string last_error_;
+
+    mutable std::mutex recent_tx_mutex_;
+    std::deque<RecentTx> recent_tx_;
 
     // Live counters / state. Updated on RX of error frames.
     mutable std::mutex status_mutex_;

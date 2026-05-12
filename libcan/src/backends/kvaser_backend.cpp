@@ -250,7 +250,7 @@ bool KvaserBackend::send(const Frame& frame) {
     if (frame.is_remote_frame) flags |= canMSG_RTR;
 
     canStatus st = canWrite(handle_, static_cast<long>(frame.id),
-                            const_cast<uint8_t*>(frame.data),
+                            const_cast<uint8_t*>(frame.data.data()),
                             frame.dlc, flags);
     if (st != canOK) {
         recordCanError("canWrite", st);
@@ -281,7 +281,7 @@ bool KvaserBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
 
     frame.id = static_cast<uint32_t>(id);
     frame.dlc = static_cast<uint8_t>(dlc > 8 ? 8 : dlc);
-    std::memcpy(frame.data, data, frame.dlc);
+    std::memcpy(frame.data.data(), data, frame.dlc);
     frame.timestamp_us = static_cast<uint64_t>(ts_ms) * 1000ULL;
     frame.is_extended_id = (flags & canMSG_EXT) != 0;
     frame.is_remote_frame = (flags & canMSG_RTR) != 0;

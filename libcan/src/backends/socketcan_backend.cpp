@@ -8,6 +8,8 @@
 
 #include "socketcan_backend.h"
 
+#include "can/can_types.h"
+
 #include <linux/can.h>
 #include <linux/can/error.h>
 #include <linux/can/raw.h>
@@ -17,6 +19,8 @@
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -126,6 +130,27 @@ void fillFromUsbDir(AdapterInfo& info, const std::string& usb_dir) {
     }
 }
 
+/// Monotonic timestamp used for TX-echo deque deadlines and as a fallback
+/// when the kernel doesn't deliver SCM_TIMESTAMPNS. Microseconds.
+uint64_t nowMicros() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+/// FNV-1a 64-bit hash of a payload. Used (with id + dlc + fd flag) as the
+/// match key for TX-echo detection. Collisions are tolerable: the worst
+/// case is a single misattributed direction flag on a frame the app sent
+/// the exact same payload for within the echo window.
+uint64_t fnv1aHash(const uint8_t* data, std::size_t len) {
+    uint64_t h = 0xcbf29ce484222325ULL;
+    for (std::size_t i = 0; i < len; ++i) {
+        h ^= data[i];
+        h *= 0x100000001b3ULL;
+    }
+    return h;
+}
+
 /// Build a fully-populated AdapterInfo for a SocketCAN interface name.
 AdapterInfo buildSocketCanInfo(const std::string& iface) {
     AdapterInfo a;
@@ -233,6 +258,18 @@ bool SocketCanBackend::open(const ChannelConfig& cfg) {
     int recv_own = cfg.receive_own_messages ? 1 : 0;
     ::setsockopt(fd, SOL_CAN_RAW, CAN_RAW_RECV_OWN_MSGS, &recv_own, sizeof(recv_own));
 
+    // Request nanosecond-resolution kernel timestamps; we extract them
+    // from the recvmsg cmsg buffer and populate Frame::timestamp_us.
+    // Non-fatal on failure — the read path falls back to steady_clock.
+    int ts_on = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPNS, &ts_on, sizeof(ts_on));
+
+    // Opt the socket into receiving CAN-FD frames. Old kernels or
+    // non-FD-capable interfaces return an error; that's OK — the socket
+    // falls back to classic-only behavior.
+    int fd_on = 1;
+    fd_enabled_ = ::setsockopt(fd, SOL_CAN_RAW, CAN_RAW_FD_FRAMES, &fd_on, sizeof(fd_on)) == 0;
+
     // CAN_RAW_LOOPBACK is left at the kernel default (on). That makes TX'd
     // frames visible to other sockets on the same interface, which is what
     // monitoring/sniffer tools rely on. We only override if the caller
@@ -260,6 +297,11 @@ void SocketCanBackend::close() {
         ::close(socket_fd_);
         socket_fd_ = -1;
     }
+    fd_enabled_ = false;
+    {
+        std::lock_guard<std::mutex> lock(recent_tx_mutex_);
+        recent_tx_.clear();
+    }
     std::lock_guard<std::mutex> lock(status_mutex_);
     bus_state_ = BusState::Unknown;
 }
@@ -270,19 +312,93 @@ bool SocketCanBackend::send(const Frame& frame) {
         return false;
     }
 
-    can_frame raw{};
-    raw.can_id = frame.id;
-    if (frame.is_extended_id) raw.can_id |= CAN_EFF_FLAG;
-    if (frame.is_remote_frame) raw.can_id |= CAN_RTR_FLAG;
-    raw.can_dlc = frame.dlc > 8 ? 8 : frame.dlc;
-    std::memcpy(raw.data, frame.data, raw.can_dlc);
+    ssize_t n;
+    if (frame.is_fd_frame) {
+        if (!fd_enabled_) {
+            recordError("send: CAN-FD frame requested but socket is not FD-enabled");
+            return false;
+        }
+        canfd_frame raw{};
+        raw.can_id = frame.id;
+        if (frame.is_extended_id) raw.can_id |= CAN_EFF_FLAG;
+        // RTR is not valid for CAN-FD; ignore the flag if set.
+        raw.len = frame.dlc > MAX_CAN_FD_DLC ? static_cast<uint8_t>(MAX_CAN_FD_DLC) : frame.dlc;
+        raw.flags = 0;
+        if (frame.is_brs) raw.flags |= CANFD_BRS;
+        if (frame.is_esi) raw.flags |= CANFD_ESI;
+        std::memcpy(raw.data, frame.data.data(), raw.len);
 
-    ssize_t n = ::write(socket_fd_, &raw, sizeof(raw));
-    if (n != static_cast<ssize_t>(sizeof(raw))) {
-        recordError(std::string("write() failed: ") + std::strerror(errno));
-        return false;
+        n = ::write(socket_fd_, &raw, sizeof(raw));
+        if (n != static_cast<ssize_t>(sizeof(raw))) {
+            recordError(std::string("write(canfd_frame) failed: ") + std::strerror(errno));
+            return false;
+        }
+    } else {
+        can_frame raw{};
+        raw.can_id = frame.id;
+        if (frame.is_extended_id) raw.can_id |= CAN_EFF_FLAG;
+        if (frame.is_remote_frame) raw.can_id |= CAN_RTR_FLAG;
+        raw.can_dlc = frame.dlc > 8 ? 8 : frame.dlc;
+        std::memcpy(raw.data, frame.data.data(), raw.can_dlc);
+
+        n = ::write(socket_fd_, &raw, sizeof(raw));
+        if (n != static_cast<ssize_t>(sizeof(raw))) {
+            recordError(std::string("write() failed: ") + std::strerror(errno));
+            return false;
+        }
+    }
+
+    // Record the send so the matching kernel echo (delivered when
+    // CAN_RAW_RECV_OWN_MSGS is on) can be flagged as TX on the way back.
+    if (config_.receive_own_messages) {
+        pushRecentTx(frame);
     }
     return true;
+}
+
+void SocketCanBackend::pushRecentTx(const Frame& frame) {
+    // Echoes typically arrive within sub-millisecond; 200ms is a generous
+    // window that still bounds memory. The deque is also capped by entry
+    // count below, so a flood of unmatched TX (e.g. RECV_OWN was turned
+    // off after open()) can't grow it unbounded.
+    constexpr uint64_t kEchoWindowUs = 200'000;
+    constexpr std::size_t kMaxEntries = 256;
+
+    const uint64_t now = nowMicros();
+    RecentTx entry;
+    entry.id = frame.id;
+    entry.dlc = frame.dlc;
+    entry.is_fd = frame.is_fd_frame;
+    entry.payload_hash = fnv1aHash(frame.data.data(), frame.dlc);
+    entry.deadline_us = now + kEchoWindowUs;
+
+    std::lock_guard<std::mutex> lock(recent_tx_mutex_);
+    // Drop expired entries from the front (deque is roughly time-ordered
+    // since deadlines all use the same offset).
+    while (!recent_tx_.empty() && recent_tx_.front().deadline_us < now) {
+        recent_tx_.pop_front();
+    }
+    if (recent_tx_.size() >= kMaxEntries) {
+        recent_tx_.pop_front();
+    }
+    recent_tx_.push_back(entry);
+}
+
+bool SocketCanBackend::consumeRecentTx(const Frame& frame) {
+    const uint64_t now = nowMicros();
+    const uint64_t h = fnv1aHash(frame.data.data(), frame.dlc);
+
+    std::lock_guard<std::mutex> lock(recent_tx_mutex_);
+    for (auto it = recent_tx_.begin(); it != recent_tx_.end(); ++it) {
+        if (it->deadline_us < now) continue;        // expired; let next prune sweep it
+        if (it->id != frame.id) continue;
+        if (it->dlc != frame.dlc) continue;
+        if (it->is_fd != frame.is_fd_frame) continue;
+        if (it->payload_hash != h) continue;
+        recent_tx_.erase(it);
+        return true;
+    }
+    return false;
 }
 
 bool SocketCanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
@@ -303,36 +419,109 @@ bool SocketCanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) 
     int sel = ::select(socket_fd_ + 1, &rfds, nullptr, nullptr, &tv);
     if (sel <= 0) return false; // timeout (incl. 0ms with nothing pending) or error
 
-    can_frame raw{};
-    ssize_t n = ::read(socket_fd_, &raw, sizeof(raw));
-    if (n != static_cast<ssize_t>(sizeof(raw))) {
-        if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            recordError(std::string("read() failed: ") + std::strerror(errno));
+    // recvmsg lets us pick up the kernel's SO_TIMESTAMPNS cmsg alongside the
+    // frame payload. The iov buffer is sized for canfd_frame (72 B), which
+    // is a superset of can_frame (16 B); we dispatch on the actual byte
+    // count returned.
+    union {
+        struct can_frame   classic;
+        struct canfd_frame fd;
+        uint8_t            bytes[sizeof(struct canfd_frame)];
+    } buf;
+
+    iovec iov{};
+    iov.iov_base = buf.bytes;
+    iov.iov_len  = sizeof(buf);
+
+    alignas(struct cmsghdr) uint8_t cmsg_buf[CMSG_SPACE(sizeof(struct timespec))];
+
+    msghdr msg{};
+    msg.msg_iov        = &iov;
+    msg.msg_iovlen     = 1;
+    msg.msg_control    = cmsg_buf;
+    msg.msg_controllen = sizeof(cmsg_buf);
+
+    ssize_t n = ::recvmsg(socket_fd_, &msg, 0);
+    if (n <= 0) {
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            recordError(std::string("recvmsg() failed: ") + std::strerror(errno));
         }
         return false;
     }
 
-    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-
-    bool is_err = (raw.can_id & CAN_ERR_FLAG) != 0;
-    bool is_ext = (raw.can_id & CAN_EFF_FLAG) != 0;
-    bool is_rtr = (raw.can_id & CAN_RTR_FLAG) != 0;
-
-    frame.id = raw.can_id & (is_ext ? CAN_EFF_MASK : CAN_SFF_MASK);
-    frame.dlc = raw.can_dlc;
-    std::memcpy(frame.data, raw.data, raw.can_dlc);
-    frame.timestamp_us = static_cast<uint64_t>(now_us);
-    frame.is_extended_id = is_ext;
-    frame.is_remote_frame = is_rtr;
-    frame.is_error_frame = is_err;
-    frame.is_fd_frame = false;
-
-    if (is_err) {
-        updateStateFromErrorFrame(raw.can_id, raw.data, raw.can_dlc);
-        // If the caller didn't ask for error frames, drop them.
-        if (!config_.receive_error_frames) return false;
+    // Extract the kernel timestamp (nanoseconds) from the cmsg buffer.
+    uint64_t ts_us = 0;
+    for (cmsghdr* c = CMSG_FIRSTHDR(&msg); c != nullptr; c = CMSG_NXTHDR(&msg, c)) {
+        if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_TIMESTAMPNS) {
+            struct timespec ts;
+            std::memcpy(&ts, CMSG_DATA(c), sizeof(ts));
+            ts_us = static_cast<uint64_t>(ts.tv_sec) * 1'000'000ULL
+                  + static_cast<uint64_t>(ts.tv_nsec) / 1'000ULL;
+            break;
+        }
     }
+    if (ts_us == 0) {
+        // No cmsg timestamp — driver doesn't support SO_TIMESTAMPNS, or
+        // the option wasn't accepted. Synthesize a host-side timestamp.
+        ts_us = nowMicros();
+    }
+
+    // Reset all fields; older callers may reuse the frame across calls
+    // and we don't want stale flags leaking through (e.g. is_brs from a
+    // previous FD frame surviving onto a classic frame).
+    frame = Frame{};
+    frame.timestamp_us = ts_us;
+
+    if (n == static_cast<ssize_t>(sizeof(struct canfd_frame))) {
+        // CAN-FD frame.
+        const auto& fd = buf.fd;
+        const bool is_err = (fd.can_id & CAN_ERR_FLAG) != 0;
+        const bool is_ext = (fd.can_id & CAN_EFF_FLAG) != 0;
+
+        frame.id = fd.can_id & (is_ext ? CAN_EFF_MASK : CAN_SFF_MASK);
+        frame.dlc = fd.len > MAX_CAN_FD_DLC ? static_cast<uint8_t>(MAX_CAN_FD_DLC) : fd.len;
+        std::memcpy(frame.data.data(), fd.data, frame.dlc);
+        frame.is_extended_id  = is_ext;
+        frame.is_remote_frame = false;  // RTR is not defined for CAN-FD
+        frame.is_error_frame  = is_err;
+        frame.is_fd_frame     = true;
+        frame.is_brs          = (fd.flags & CANFD_BRS) != 0;
+        frame.is_esi          = (fd.flags & CANFD_ESI) != 0;
+
+        if (is_err) {
+            updateStateFromErrorFrame(fd.can_id, fd.data, frame.dlc);
+            if (!config_.receive_error_frames) return false;
+        }
+    } else if (n == static_cast<ssize_t>(sizeof(struct can_frame))) {
+        // Classic CAN frame.
+        const auto& raw = buf.classic;
+        const bool is_err = (raw.can_id & CAN_ERR_FLAG) != 0;
+        const bool is_ext = (raw.can_id & CAN_EFF_FLAG) != 0;
+        const bool is_rtr = (raw.can_id & CAN_RTR_FLAG) != 0;
+
+        frame.id = raw.can_id & (is_ext ? CAN_EFF_MASK : CAN_SFF_MASK);
+        frame.dlc = raw.can_dlc;
+        std::memcpy(frame.data.data(), raw.data, raw.can_dlc);
+        frame.is_extended_id  = is_ext;
+        frame.is_remote_frame = is_rtr;
+        frame.is_error_frame  = is_err;
+        frame.is_fd_frame     = false;
+
+        if (is_err) {
+            updateStateFromErrorFrame(raw.can_id, raw.data, raw.can_dlc);
+            if (!config_.receive_error_frames) return false;
+        }
+    } else {
+        recordError("recvmsg returned unexpected size " + std::to_string(n));
+        return false;
+    }
+
+    // If echo reception is on, try to attribute this frame to one of our
+    // recent sends. Frames that don't match any recent TX stay is_tx=false.
+    if (config_.receive_own_messages) {
+        frame.is_tx = consumeRecentTx(frame);
+    }
+
     return true;
 }
 

@@ -130,4 +130,15 @@ if(BUILD_TESTING)
     target_compile_features(test_backend PRIVATE cxx_std_23)
 
     add_test(NAME BackendTest COMMAND test_backend)
+
+    # Live SocketCAN integration test — skipped at runtime if vcan0 is
+    # not present (exit 77, the CTest skip convention).
+    if(CAN_BACKEND_SOCKETCAN)
+        add_executable(test_socketcan_live test/test_socketcan_live.cpp)
+        target_link_libraries(test_socketcan_live PRIVATE libcan)
+        target_compile_features(test_socketcan_live PRIVATE cxx_std_23)
+
+        add_test(NAME SocketCanLiveTest COMMAND test_socketcan_live)
+        set_tests_properties(SocketCanLiveTest PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
 endif()

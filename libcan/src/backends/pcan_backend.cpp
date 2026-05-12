@@ -283,7 +283,7 @@ bool PcanBackend::send(const Frame& frame) {
     msg.MSGTYPE = frame.is_extended_id ? PCAN_MESSAGE_EXTENDED : PCAN_MESSAGE_STANDARD;
     if (frame.is_remote_frame) msg.MSGTYPE |= PCAN_MESSAGE_RTR;
     msg.LEN = frame.dlc > 8 ? 8 : frame.dlc;
-    std::memcpy(msg.DATA, frame.data, msg.LEN);
+    std::memcpy(msg.DATA, frame.data.data(), msg.LEN);
 
     TPCANStatus st = CAN_Write(channel_handle_, &msg);
     if (st != PCAN_ERROR_OK) {
@@ -340,7 +340,7 @@ bool PcanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
     if (st == PCAN_ERROR_OK) {
         frame.id = msg.ID;
         frame.dlc = msg.LEN;
-        std::memcpy(frame.data, msg.DATA, msg.LEN > 8 ? 8 : msg.LEN);
+        std::memcpy(frame.data.data(), msg.DATA, msg.LEN > 8 ? 8 : msg.LEN);
         uint64_t pcan_us = static_cast<uint64_t>(ts.millis_overflow) * 1000000000ULL
                          + static_cast<uint64_t>(ts.millis) * 1000ULL
                          + static_cast<uint64_t>(ts.micros);
