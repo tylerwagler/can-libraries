@@ -21,10 +21,12 @@
 #include <sys/ioctl.h>
 #include <net/if.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <thread>
 #include <unistd.h>
 
 static int g_passed = 0;
@@ -177,6 +179,61 @@ int main() {
     }
 
     backend->close();
+
+    std::printf("\nclose() wakes a receive() blocked in select():\n");
+    {
+        // Regression guard for the M-1 thread-safety work: close() must
+        // shutdown(2) the underlying socket before closing it, so a
+        // worker thread blocked in select() returns promptly instead of
+        // waiting out its full timeout. Without that, a Qt-style app
+        // shutdown sequence would hang for `timeout` per worker.
+        auto backend2 = can::ICanBackend::create(can::BackendKind::SocketCan);
+        can::ChannelConfig cfg2;
+        cfg2.channel_id = "vcan0";
+        cfg2.bitrate = 500000;
+        const bool opened = backend2->open(cfg2);
+        CHECK(opened, "second backend opens");
+
+        if (opened) {
+            // Generous receive timeout so we can clearly distinguish
+            // "close() woke us" from "timeout fired naturally".
+            constexpr auto kReceiveTimeout = std::chrono::milliseconds(5000);
+            // Budget for close() to wake the worker. select()-driven
+            // wakeups are typically sub-millisecond; 250ms is loose
+            // enough to absorb scheduler hiccups in CI without ever
+            // colliding with the 5s receive timeout.
+            constexpr auto kWakeBudget = std::chrono::milliseconds(250);
+
+            std::atomic<bool> worker_returned{false};
+            std::atomic<int64_t> worker_elapsed_us{-1};
+
+            std::thread worker([&] {
+                auto t0 = std::chrono::steady_clock::now();
+                can::Frame f;
+                backend2->receive(f, kReceiveTimeout);
+                auto t1 = std::chrono::steady_clock::now();
+                worker_elapsed_us.store(
+                    std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+                worker_returned.store(true);
+            });
+
+            // Give the worker a moment to land in select().
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            auto t_close = std::chrono::steady_clock::now();
+            backend2->close();
+            worker.join();
+            auto t_join = std::chrono::steady_clock::now();
+
+            const auto wake = std::chrono::duration_cast<std::chrono::milliseconds>(t_join - t_close);
+            CHECK(worker_returned.load(), "worker returned");
+            CHECK(wake < kWakeBudget,
+                  "close() wakes receive() inside wake budget (not the full timeout)");
+            std::printf("    wake-up after close: %lld ms (budget %lld ms, receive timeout %lld ms)\n",
+                        static_cast<long long>(wake.count()),
+                        static_cast<long long>(kWakeBudget.count()),
+                        static_cast<long long>(kReceiveTimeout.count()));
+        }
+    }
 
     std::printf("\n========================================\n");
     std::printf("Test Results:\n");

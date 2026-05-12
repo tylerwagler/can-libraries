@@ -114,9 +114,29 @@ struct ChannelConfig {
 ///   5. close() or destruct
 ///
 /// Thread safety:
-///   - send() must be safe to call from any thread (vendor APIs are thread-safe).
-///   - receive() should only be called from one thread at a time.
-///   - status(), info(), lastError() are thread-safe.
+///   open() must not race close() or any operational method on the
+///   same backend. Once open() has returned successfully:
+///     - send() is safe to call concurrently from multiple threads.
+///     - receive() must be called from a single thread at a time.
+///     - status(), info(), lastError() are safe to call concurrently
+///       with each other and with send/receive.
+///
+///   close() *may* be called while another thread is blocked in
+///   receive(). The blocked receive() returns false promptly — the
+///   kernel-fd backends (currently SocketCAN) use a sideband eventfd
+///   to wake their select(), so the worker doesn't wait out its
+///   timeout. The supported teardown pattern is:
+///     1. main thread calls close() — interrupts any in-flight
+///        receive(), and from this point on send()/receive() return
+///        immediately with a failure
+///     2. main thread joins the worker thread(s) (which return from
+///        their last receive() and exit their loops)
+///     3. destructor or next open() runs
+///
+///   send() racing close() is best-effort: it may succeed if the
+///   syscall completes before close() reclaims the fd, or fail with
+///   EBADF / a generic write error. After close() returns, no new
+///   send()/receive() may be initiated.
 class LIBCAN_EXPORT ICanBackend {
 public:
     virtual ~ICanBackend() = default;

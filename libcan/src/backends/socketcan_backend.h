@@ -30,11 +30,11 @@ public:
 
     bool open(const ChannelConfig& cfg) override;
     void close() override;
-    bool isOpen() const override { return socket_fd_ >= 0; }
+    bool isOpen() const override { return socket_fd_.load(std::memory_order_acquire) >= 0; }
 
     bool send(const Frame& frame) override;
     bool receive(Frame& frame, std::chrono::milliseconds timeout) override;
-    int receiveFd() const override { return socket_fd_; }
+    int receiveFd() const override { return socket_fd_.load(std::memory_order_acquire); }
 
     ChannelStatus status() const override;
     AdapterInfo info() const override;
@@ -59,7 +59,18 @@ private:
     void pushRecentTx(const Frame& frame);
     bool consumeRecentTx(const Frame& frame);
 
-    int socket_fd_ = -1;
+    /// Held atomic so concurrent loads from send/receive against the
+    /// store in close() are well-defined. close() exchanges this to -1
+    /// *before* invoking the syscall on the fd, so a later loader sees
+    /// the closed state. The kernel-reuse TOCTOU on a fd already loaded
+    /// before close() ran is still undefined per i_can_backend.h.
+    std::atomic<int> socket_fd_{-1};
+    /// Sideband eventfd added to receive()'s select(2) fdset. close()
+    /// writes to it to wake a worker blocked in select() promptly —
+    /// shutdown(2) is a no-op on AF_CAN SOCK_RAW sockets, so we need
+    /// an explicit wakeup channel. Atomic so receive() and close() can
+    /// observe each other's writes without UB. -1 when not open.
+    std::atomic<int> shutdown_eventfd_{-1};
     bool fd_enabled_ = false;
     ChannelConfig config_;
     AdapterInfo info_;

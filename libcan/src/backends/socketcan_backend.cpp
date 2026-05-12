@@ -16,6 +16,7 @@
 #include <linux/ethtool.h>
 #include <linux/sockios.h>
 #include <net/if.h>
+#include <sys/eventfd.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -216,7 +217,9 @@ std::vector<AdapterInfo> SocketCanBackend::enumerateAdapters() {
 }
 
 bool SocketCanBackend::open(const ChannelConfig& cfg) {
-    if (socket_fd_ >= 0) {
+    // open() is a lifecycle method — by contract callers serialize it
+    // against close() and the operational methods, so a plain load is fine.
+    if (socket_fd_.load(std::memory_order_acquire) >= 0) {
         recordError("Backend already open");
         return false;
     }
@@ -275,7 +278,23 @@ bool SocketCanBackend::open(const ChannelConfig& cfg) {
     // monitoring/sniffer tools rely on. We only override if the caller
     // explicitly disables it via a future config flag.
 
-    socket_fd_ = fd;
+    // Sideband eventfd: receive() selects on both the CAN socket and this
+    // fd, so close() can wake a blocked worker by writing to it. Without
+    // this an in-flight receive() would wait out its full timeout before
+    // a graceful shutdown can proceed (shutdown(2) is a no-op on
+    // AF_CAN SOCK_RAW, so it can't be used for the wakeup).
+    int evfd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (evfd < 0) {
+        recordError(std::string("eventfd() failed: ") + std::strerror(errno));
+        ::close(fd);
+        return false;
+    }
+    shutdown_eventfd_.store(evfd, std::memory_order_release);
+
+    // Release-store so that operational threads observing socket_fd_ >= 0
+    // are guaranteed to see the shutdown_eventfd_ / config_ / info_ writes
+    // that precede it.
+    socket_fd_.store(fd, std::memory_order_release);
     config_ = cfg;
 
     info_ = buildSocketCanInfo(cfg.channel_id);
@@ -293,10 +312,33 @@ bool SocketCanBackend::open(const ChannelConfig& cfg) {
 }
 
 void SocketCanBackend::close() {
-    if (socket_fd_ >= 0) {
-        ::close(socket_fd_);
-        socket_fd_ = -1;
+    // Race shape we have to handle: receive() can be running on another
+    // thread, mid-select(), when close() is invoked. The eventfd is the
+    // wakeup mechanism; the atomic exchanges fence out new entrants and
+    // make the "close raced me" check in receive() reliable.
+    //
+    // Ordering:
+    //   1. Exchange shutdown_eventfd_ to -1 first. Any worker that has
+    //      NOT yet loaded shutdown_eventfd_ will now see -1 and bail out
+    //      of receive() before it ever consults the CAN fd.
+    //   2. Write to the *snapshotted* old eventfd to wake any worker
+    //      that loaded it BEFORE step 1 — they're sitting in select(),
+    //      this is what wakes them.
+    //   3. Exchange socket_fd_ to -1 so any racing send/receive that
+    //      sneaks in here-on gets a fast -1 and bails.
+    //   4. Close the kernel fds.
+    // Steps 1 & 3 use exchange so close() is idempotent: a second call
+    // gets back -1 and skips the syscalls.
+    int evfd = shutdown_eventfd_.exchange(-1, std::memory_order_acq_rel);
+    if (evfd >= 0) {
+        const uint64_t one = 1;
+        ssize_t w = ::write(evfd, &one, sizeof(one));
+        (void)w;
     }
+    int fd = socket_fd_.exchange(-1, std::memory_order_acq_rel);
+    if (fd >= 0) ::close(fd);
+    if (evfd >= 0) ::close(evfd);
+
     fd_enabled_ = false;
     {
         std::lock_guard<std::mutex> lock(recent_tx_mutex_);
@@ -307,7 +349,10 @@ void SocketCanBackend::close() {
 }
 
 bool SocketCanBackend::send(const Frame& frame) {
-    if (socket_fd_ < 0) {
+    // Load once. If close() races us, the fd we cached may already be
+    // gone — kernel returns EBADF and we surface that as a send failure.
+    const int fd = socket_fd_.load(std::memory_order_acquire);
+    if (fd < 0) {
         recordError("send() on closed backend");
         return false;
     }
@@ -328,7 +373,7 @@ bool SocketCanBackend::send(const Frame& frame) {
         if (frame.is_esi) raw.flags |= CANFD_ESI;
         std::memcpy(raw.data, frame.data.data(), raw.len);
 
-        n = ::write(socket_fd_, &raw, sizeof(raw));
+        n = ::write(fd, &raw, sizeof(raw));
         if (n != static_cast<ssize_t>(sizeof(raw))) {
             recordError(std::string("write(canfd_frame) failed: ") + std::strerror(errno));
             return false;
@@ -341,7 +386,7 @@ bool SocketCanBackend::send(const Frame& frame) {
         raw.can_dlc = frame.dlc > 8 ? 8 : frame.dlc;
         std::memcpy(raw.data, frame.data.data(), raw.can_dlc);
 
-        n = ::write(socket_fd_, &raw, sizeof(raw));
+        n = ::write(fd, &raw, sizeof(raw));
         if (n != static_cast<ssize_t>(sizeof(raw))) {
             recordError(std::string("write() failed: ") + std::strerror(errno));
             return false;
@@ -402,7 +447,17 @@ bool SocketCanBackend::consumeRecentTx(const Frame& frame) {
 }
 
 bool SocketCanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
-    if (socket_fd_ < 0) return false;
+    // Load both fds before issuing syscalls. close() invalidates them
+    // in this order: shutdown_eventfd_ first, then socket_fd_ — so if
+    // we observe shutdown_eventfd_ < 0 below, close() is mid-flight and
+    // we bail without touching either kernel fd. Conversely, if we
+    // observe a valid eventfd, any concurrent close() will signal it
+    // (the signal targets the value we snapshotted) and our select()
+    // returns promptly.
+    const int fd = socket_fd_.load(std::memory_order_acquire);
+    if (fd < 0) return false;
+    const int evfd = shutdown_eventfd_.load(std::memory_order_acquire);
+    if (evfd < 0) return false;
 
     // Always select() — including with timeout=0ms, which is the standard "non-blocking poll"
     // semantics callers expect. The previous optimization that skipped select() when
@@ -410,14 +465,20 @@ bool SocketCanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) 
     // hangs a polling caller indefinitely on an idle bus and breaks clean thread shutdown.
     fd_set rfds;
     FD_ZERO(&rfds);
-    FD_SET(socket_fd_, &rfds);
+    FD_SET(fd, &rfds);
+    if (evfd >= 0) FD_SET(evfd, &rfds);
 
     timeval tv;
     tv.tv_sec = timeout.count() / 1000;
     tv.tv_usec = (timeout.count() % 1000) * 1000;
 
-    int sel = ::select(socket_fd_ + 1, &rfds, nullptr, nullptr, &tv);
+    const int nfds = (evfd > fd ? evfd : fd) + 1;
+    int sel = ::select(nfds, &rfds, nullptr, nullptr, &tv);
     if (sel <= 0) return false; // timeout (incl. 0ms with nothing pending) or error
+
+    // close() signalled us — exit promptly without touching the CAN
+    // socket (which may already be torn down).
+    if (evfd >= 0 && FD_ISSET(evfd, &rfds)) return false;
 
     // recvmsg lets us pick up the kernel's SO_TIMESTAMPNS cmsg alongside the
     // frame payload. The iov buffer is sized for canfd_frame (72 B), which
@@ -441,9 +502,13 @@ bool SocketCanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) 
     msg.msg_control    = cmsg_buf;
     msg.msg_controllen = sizeof(cmsg_buf);
 
-    ssize_t n = ::recvmsg(socket_fd_, &msg, 0);
+    ssize_t n = ::recvmsg(fd, &msg, 0);
     if (n <= 0) {
-        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        // n == 0 happens when close()/shutdown() races us between select()
+        // returning readable and recvmsg() running — graceful exit, not an
+        // error. n < 0 with EAGAIN/EWOULDBLOCK is the same: stale wakeup.
+        // EBADF means close() already swapped the fd out; also benign.
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EBADF) {
             recordError(std::string("recvmsg() failed: ") + std::strerror(errno));
         }
         return false;
@@ -540,7 +605,7 @@ ChannelStatus SocketCanBackend::status() const {
 }
 
 AdapterInfo SocketCanBackend::info() const {
-    if (socket_fd_ < 0) return info_;
+    if (socket_fd_.load(std::memory_order_acquire) < 0) return info_;
     // Refresh dynamic fields each call so callers see live driver/firmware
     // strings even if they queried before open().
     return buildSocketCanInfo(config_.channel_id);

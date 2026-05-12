@@ -124,8 +124,23 @@ backend->close();
 
 `receive()` blocks in the kernel (event-driven via `select()` /
 `WaitForSingleObject`) until a frame arrives or the timeout expires —
-no polling. `send()` is documented thread-safe on every backend, so
-multiple threads may transmit concurrently.
+no polling.
+
+**Thread safety.** `open()` and `close()` are lifecycle methods: they
+must not run concurrently with each other or with `send` / `receive` /
+`status` / `info` / `lastError`. Once `open()` has returned successfully
+and until `close()` is called:
+
+- `send()` is safe to call from multiple threads concurrently.
+- `receive()` must be called from a single thread at a time.
+- `status()`, `info()`, `lastError()` are safe to call alongside the above.
+
+`SocketCanBackend::close()` calls `shutdown(2)` on the underlying CAN
+socket before closing it, so a `receive()` blocked in `select()` on a
+worker thread returns promptly when the owner tears the backend down —
+provided the owner has signalled the worker to stop and then joins it
+*after* `close()`. Racing a syscall against `close()` remains undefined;
+the contract above is the supported pattern.
 
 For Qt apps, use the `qt_template` library on top of libcan rather than
 calling `ICanBackend` directly — it provides a worker-thread-based
