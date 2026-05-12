@@ -32,12 +32,19 @@ else()
 endif()
 option(CAN_BACKEND_PCAN   "Build PCANBasic backend" OFF)
 option(CAN_BACKEND_KVASER "Build Kvaser canlib backend" OFF)
-option(CAN_BACKEND_VECTOR "Build Vector XL backend (Windows + supported Linux hardware)" OFF)
-# Vector's XL Driver Library has both Windows and Linux releases. The Linux
-# library covers the modern lineup (VN1600 family, VN5000 family, etc.) but
-# not all Vector hardware. The user must download the Linux SDK separately
-# from Vector — find_package(VectorXL) below will fail with a clear error
-# if the SDK isn't present.
+option(CAN_BACKEND_VECTOR "Build Vector XL backend (NOT YET IMPLEMENTED)" OFF)
+# Vector XL Driver Library would land here, but the backend source
+# (src/backends/vector_backend.cpp) and FindVectorXL.cmake module aren't
+# in the tree yet. The option is kept visible so the planned shape is
+# discoverable, but flipping it on fails at configure time with a clear
+# message rather than dying later on a missing source file.
+if(CAN_BACKEND_VECTOR)
+    message(FATAL_ERROR
+        "CAN_BACKEND_VECTOR is not yet implemented. There is no "
+        "src/backends/vector_backend.cpp in the tree and no "
+        "FindVectorXL.cmake module under cmake/. Disable this option "
+        "(it is OFF by default) to proceed.")
+endif()
 
 # Add cmake/ to the module path so Find* modules are discoverable.
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
@@ -49,9 +56,6 @@ if(CAN_BACKEND_PCAN)
 endif()
 if(CAN_BACKEND_KVASER)
     find_package(Kvaser REQUIRED)
-endif()
-if(CAN_BACKEND_VECTOR)
-    find_package(VectorXL REQUIRED)
 endif()
 
 # Export compile commands for IDE support

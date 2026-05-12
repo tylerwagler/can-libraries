@@ -86,10 +86,16 @@ from the corresponding `Find*.cmake` module.
 | `CAN_BACKEND_SOCKETCAN` | ON on Linux            | Linux kernel headers       |
 | `CAN_BACKEND_PCAN`      | OFF                    | PEAK-System PCANBasic      |
 | `CAN_BACKEND_KVASER`    | OFF                    | Kvaser canlib (kvlibsdk)   |
-| `CAN_BACKEND_VECTOR`    | OFF                    | Vector XL Driver Library   |
+| `CAN_BACKEND_VECTOR`    | OFF (not implemented)  | n/a — fails configure if ON |
 
-Override SDK search paths with `-DPCANBASIC_ROOT=…`, `-DKVASER_ROOT=…`,
-or `-DVECTORXL_ROOT=…`.
+Override SDK search paths with `-DPCANBASIC_ROOT=…` or `-DKVASER_ROOT=…`.
+
+`CAN_BACKEND_PCAN` and `CAN_BACKEND_KVASER` currently advertise CAN-FD as
+**not supported** via `BackendCapabilities::supports_can_fd`; the open /
+send paths reject FD configurations and frames respectively. CAN-FD is
+end-to-end working on `CAN_BACKEND_SOCKETCAN` only. The Vector backend
+is a planned placeholder — flipping the option on produces a fatal-error
+at configure time.
 
 ## Using libcan
 

@@ -112,7 +112,12 @@ PcanBackend::~PcanBackend() {
 
 BackendCapabilities PcanBackend::capabilities() const {
     BackendCapabilities caps;
-    caps.supports_can_fd = true;
+    // CAN-FD is not yet wired through this backend: open() refuses
+    // data_bitrate > 0, send()/receive() use the classic TPCANMsg types
+    // (FD would need TPCANMsgFD with CAN_WriteFD / CAN_ReadFD). Advertise
+    // false here so consumers don't try to send FD frames thinking they'll
+    // round-trip. Re-enable once the FD path lands end-to-end.
+    caps.supports_can_fd = false;
     caps.supports_listen_only = true;
     caps.supports_loopback = false; // not exposed via PCANBasic in a portable way
     caps.supports_receive_own = false;
@@ -338,13 +343,20 @@ bool PcanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
     TPCANTimestamp ts;
     TPCANStatus st = CAN_Read(channel_handle_, &msg, &ts);
     if (st == PCAN_ERROR_OK) {
+        // Reset before populating so stale flags / data bytes from a prior
+        // call don't leak through. Matches SocketCanBackend::receive().
+        frame = Frame{};
         frame.id = msg.ID;
-        frame.dlc = msg.LEN;
-        std::memcpy(frame.data.data(), msg.DATA, msg.LEN > 8 ? 8 : msg.LEN);
-        uint64_t pcan_us = static_cast<uint64_t>(ts.millis_overflow) * 1000000000ULL
-                         + static_cast<uint64_t>(ts.millis) * 1000ULL
-                         + static_cast<uint64_t>(ts.micros);
-        frame.timestamp_us = pcan_us;
+        const uint8_t copy_len = msg.LEN > 8 ? 8 : msg.LEN;
+        frame.dlc = copy_len;
+        std::memcpy(frame.data.data(), msg.DATA, copy_len);
+        // TPCANTimestamp: total time in ms is (millis_overflow << 32) | millis,
+        // then add micros for sub-ms resolution. The previous expression treated
+        // each overflow as 10^9 µs instead of 2^32 ms — only correct while
+        // millis_overflow == 0, i.e. the first ~49.7 days of driver uptime.
+        const uint64_t total_ms = (static_cast<uint64_t>(ts.millis_overflow) << 32)
+                                | static_cast<uint64_t>(ts.millis);
+        frame.timestamp_us = total_ms * 1000ULL + static_cast<uint64_t>(ts.micros);
         frame.is_extended_id = (msg.MSGTYPE & PCAN_MESSAGE_EXTENDED) != 0;
         frame.is_remote_frame = (msg.MSGTYPE & PCAN_MESSAGE_RTR) != 0;
         frame.is_error_frame = (msg.MSGTYPE & PCAN_MESSAGE_ERRFRAME) != 0;

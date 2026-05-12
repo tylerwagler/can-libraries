@@ -78,7 +78,12 @@ KvaserBackend::~KvaserBackend() {
 
 BackendCapabilities KvaserBackend::capabilities() const {
     BackendCapabilities caps;
-    caps.supports_can_fd = true;
+    // CAN-FD is not yet wired through this backend: open() doesn't pass
+    // canOPEN_CAN_FD, send() doesn't set canFDMSG_FDF/BRS/ESI, and
+    // canSetBusParamsFd isn't called for the data-phase bitrate. Advertise
+    // false here so consumers don't try to send FD frames thinking they'll
+    // round-trip. Re-enable once the FD path lands end-to-end.
+    caps.supports_can_fd = false;
     caps.supports_listen_only = true;
     caps.supports_loopback = true;
     caps.supports_receive_own = true;
@@ -184,6 +189,13 @@ bool KvaserBackend::open(const ChannelConfig& cfg) {
         return false;
     }
 
+    if (cfg.data_bitrate > 0) {
+        // CAN-FD open path isn't implemented yet (would need canOPEN_CAN_FD
+        // and canSetBusParamsFd). Refuse rather than silently downgrade.
+        recordError("CAN-FD open not yet implemented for Kvaser backend");
+        return false;
+    }
+
     long bitrate;
     if (!mapBitrate(cfg.bitrate, bitrate)) {
         recordError("Unsupported bitrate for Kvaser preset: " + std::to_string(cfg.bitrate));
@@ -244,14 +256,23 @@ bool KvaserBackend::send(const Frame& frame) {
         recordError("send() on closed Kvaser backend");
         return false;
     }
-    unsigned int flags = 0;
-    if (frame.is_extended_id) flags |= canMSG_EXT;
-    else                      flags |= canMSG_STD;
+    if (frame.is_fd_frame) {
+        // Reject loudly rather than silently truncating into a classic-CAN
+        // canWrite. CAN-FD round-trip via this backend isn't wired yet —
+        // see capabilities().supports_can_fd.
+        recordError("CAN-FD send not yet supported by Kvaser backend");
+        return false;
+    }
+    unsigned int flags = frame.is_extended_id ? canMSG_EXT : canMSG_STD;
     if (frame.is_remote_frame) flags |= canMSG_RTR;
 
+    // Clamp to MAX_CAN_DLC: frame.dlc is public and a buggy caller could
+    // hand us a value larger than the data array. canWrite reads `dlc`
+    // bytes from the buffer.
+    const uint8_t dlc = frame.dlc > MAX_CAN_DLC ? MAX_CAN_DLC : frame.dlc;
     canStatus st = canWrite(handle_, static_cast<long>(frame.id),
                             const_cast<uint8_t*>(frame.data.data()),
-                            frame.dlc, flags);
+                            dlc, flags);
     if (st != canOK) {
         recordCanError("canWrite", st);
         return false;
@@ -263,7 +284,11 @@ bool KvaserBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
     if (handle_ < 0) return false;
 
     long id = 0;
-    unsigned char data[8] = {0};
+    // Sized for CAN-FD even though we don't yet open channels in FD mode:
+    // if a future canlib or a channel opened by another process delivers an
+    // FD frame, canReadWait will write up to 64 bytes here. Sizing this at
+    // 8 was a stack-overflow waiting to happen.
+    unsigned char data[64] = {0};
     unsigned int dlc = 0;
     unsigned int flags = 0;
     unsigned long ts_ms = 0;
@@ -279,8 +304,12 @@ bool KvaserBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
         return false;
     }
 
+    // Reset before populating so stale flags / data bytes from a prior call
+    // don't leak through (e.g. is_extended_id surviving onto a standard
+    // frame). Matches SocketCanBackend::receive().
+    frame = Frame{};
     frame.id = static_cast<uint32_t>(id);
-    frame.dlc = static_cast<uint8_t>(dlc > 8 ? 8 : dlc);
+    frame.dlc = static_cast<uint8_t>(dlc > MAX_CAN_FD_DLC ? MAX_CAN_FD_DLC : dlc);
     std::memcpy(frame.data.data(), data, frame.dlc);
     frame.timestamp_us = static_cast<uint64_t>(ts_ms) * 1000ULL;
     frame.is_extended_id = (flags & canMSG_EXT) != 0;
