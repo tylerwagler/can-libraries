@@ -288,18 +288,20 @@ bool SocketCanBackend::send(const Frame& frame) {
 bool SocketCanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
     if (socket_fd_ < 0) return false;
 
-    if (timeout.count() > 0) {
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(socket_fd_, &rfds);
+    // Always select() — including with timeout=0ms, which is the standard "non-blocking poll"
+    // semantics callers expect. The previous optimization that skipped select() when
+    // timeout==0 turned the read() below into a *blocking* call (default socket mode), which
+    // hangs a polling caller indefinitely on an idle bus and breaks clean thread shutdown.
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(socket_fd_, &rfds);
 
-        timeval tv;
-        tv.tv_sec = timeout.count() / 1000;
-        tv.tv_usec = (timeout.count() % 1000) * 1000;
+    timeval tv;
+    tv.tv_sec = timeout.count() / 1000;
+    tv.tv_usec = (timeout.count() % 1000) * 1000;
 
-        int sel = ::select(socket_fd_ + 1, &rfds, nullptr, nullptr, &tv);
-        if (sel <= 0) return false; // timeout or error
-    }
+    int sel = ::select(socket_fd_ + 1, &rfds, nullptr, nullptr, &tv);
+    if (sel <= 0) return false; // timeout (incl. 0ms with nothing pending) or error
 
     can_frame raw{};
     ssize_t n = ::read(socket_fd_, &raw, sizeof(raw));
