@@ -1,0 +1,152 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs on the same ref when a new push lands.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-linux:
+    name: Build & test (Linux, ${{ matrix.compiler }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            flex \
+            bison \
+            zlib1g-dev
+
+      - name: Set up vcan0 (for SocketCAN integration test)
+        run: |
+          sudo modprobe vcan
+          sudo ip link add dev vcan0 type vcan
+          # mtu 72 = CAN-FD frame size; required for the FD round-trip
+          # case in test_socketcan_live. Classic-only frames work at the
+          # default mtu (16) but we want FD coverage in CI.
+          sudo ip link set vcan0 mtu 72
+          sudo ip link set up vcan0
+          ip link show vcan0
+
+      - name: Configure
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          cmake -S . -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCAN_BACKEND_SOCKETCAN=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure
+
+  sanitizers:
+    name: Sanitizers (clang, ASAN + UBSAN)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            flex \
+            bison \
+            zlib1g-dev
+
+      - name: Set up vcan0
+        run: |
+          sudo modprobe vcan
+          sudo ip link add dev vcan0 type vcan
+          sudo ip link set vcan0 mtu 72
+          sudo ip link set up vcan0
+
+      - name: Configure with -fsanitize=address,undefined
+        env:
+          CC: clang
+          CXX: clang++
+          CFLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all
+          CXXFLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all
+          LDFLAGS: -fsanitize=address,undefined
+        run: |
+          cmake -S . -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCAN_BACKEND_SOCKETCAN=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        working-directory: build
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --output-on-failure
+
+  vector-backend-gate:
+    name: Regression guard — CAN_BACKEND_VECTOR=ON must fail configure
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+        # Submodules aren't needed: the gate fires before any
+        # add_subdirectory(third_party/...) runs.
+
+      - name: Install minimal deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake
+
+      - name: Configure with CAN_BACKEND_VECTOR=ON — expect FATAL_ERROR
+        run: |
+          set +e
+          cmake -S . -B build -DCAN_BACKEND_VECTOR=ON 2>configure.log
+          rc=$?
+          set -e
+          if [ $rc -eq 0 ]; then
+            echo "::error::CAN_BACKEND_VECTOR=ON should fail configure but exit was 0"
+            cat configure.log
+            exit 1
+          fi
+          if ! grep -q "CAN_BACKEND_VECTOR is not yet implemented" configure.log; then
+            echo "::error::Configure failed (rc=$rc) but not with the expected message"
+            cat configure.log
+            exit 1
+          fi
+          echo "OK: cmake exited $rc with the expected message."
