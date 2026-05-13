@@ -11,10 +11,22 @@ Components:
   - `SocketCanBackend` (Linux) — wraps the kernel SocketCAN stack and
     enriches `AdapterInfo` with sysfs / SIOCETHTOOL data so the Linux
     driver yields the same diagnostic surface the vendor SDKs expose
-    (firmware version, vendor, model, USB topology, error counters)
-  - `PcanBackend` (Linux + Windows) — PEAK-System PCANBasic API
-  - `KvaserBackend` (Linux + Windows) — Kvaser canlib
+    (firmware version, vendor, model, USB topology, error counters).
+    **This is the path Linux deployments should use.** PEAK, Kvaser,
+    and most other USB CAN adapters expose themselves to Linux via
+    in-kernel drivers (`peak_usb`, `kvaser_usb`, ...) that present
+    standard `canN` netdev interfaces — `SocketCanBackend` handles
+    all of them uniformly without any vendor SDK installed.
+  - `PcanBackend` (Windows) — PEAK-System PCANBasic API. Also compiles
+    on Linux for cross-platform development, but the Linux build is
+    not the recommended deployment path: use `SocketCanBackend` against
+    the kernel's `peak_usb` driver instead.
+  - `KvaserBackend` (Windows) — Kvaser canlib. Same shape: also builds
+    on Linux for parity but Linux deployments should go through
+    `SocketCanBackend` + the kernel's `kvaser_usb` driver.
   - `VectorBackend` — placeholder; lands when Vector hardware is on hand
+    (Windows only — Vector's XL Driver Library is effectively
+    Windows-only in practice).
 
 - **Vendored Tobias Lorenz libraries** (GPL-3.0, git submodules under
   `third_party/`):
@@ -86,12 +98,18 @@ Each vendor backend is opt-in via a CMake option. If the option is on
 but the vendor SDK isn't installed, configure fails with a clear error
 from the corresponding `Find*.cmake` module.
 
-| Option                  | Default                | SDK required               |
-|-------------------------|------------------------|----------------------------|
-| `CAN_BACKEND_SOCKETCAN` | ON on Linux            | Linux kernel headers       |
-| `CAN_BACKEND_PCAN`      | OFF                    | PEAK-System PCANBasic      |
-| `CAN_BACKEND_KVASER`    | OFF                    | Kvaser canlib (kvlibsdk)   |
-| `CAN_BACKEND_VECTOR`    | OFF (not implemented)  | n/a — fails configure if ON |
+| Option                  | Default                | SDK required                 | Intended platform |
+|-------------------------|------------------------|------------------------------|-------------------|
+| `CAN_BACKEND_SOCKETCAN` | ON on Linux            | Linux kernel headers         | Linux             |
+| `CAN_BACKEND_PCAN`      | OFF                    | PEAK-System PCANBasic        | Windows           |
+| `CAN_BACKEND_KVASER`    | OFF                    | Kvaser canlib (kvlibsdk)     | Windows           |
+| `CAN_BACKEND_VECTOR`    | OFF (not implemented)  | n/a — fails configure if ON  | Windows           |
+
+The defaults reflect the intended deployment shape: **Linux uses
+SocketCAN against in-kernel drivers; Windows uses the vendor SDKs.**
+Enabling `CAN_BACKEND_PCAN` / `CAN_BACKEND_KVASER` on Linux is supported
+for cross-platform development and exotic-hardware fallbacks, but not
+how a Linux app should normally talk to PEAK or Kvaser hardware.
 
 Override SDK search paths with `-DPCANBASIC_ROOT=…` or `-DKVASER_ROOT=…`.
 
