@@ -262,20 +262,37 @@ bool SocketCanBackend::open(const ChannelConfig& cfg) {
         return false;
     }
 
-    // Always enable error frame reception so we can populate bus_state and
-    // error counters in status(). Caller can ignore them via the higher
-    // layer if they don't want them surfaced.
+    // Best-effort: enable error frame reception so we can populate
+    // bus_state and error counters in status(). On a kernel that
+    // doesn't support this filter, the call fails; status() will just
+    // continue to report BusState::Unknown. Not fatal to open().
     can_err_mask_t err_mask = CAN_ERR_MASK;
-    ::setsockopt(fd, SOL_CAN_RAW, CAN_RAW_ERR_FILTER, &err_mask, sizeof(err_mask));
+    (void)::setsockopt(fd, SOL_CAN_RAW, CAN_RAW_ERR_FILTER, &err_mask, sizeof(err_mask));
 
-    int recv_own = cfg.receive_own_messages ? 1 : 0;
-    ::setsockopt(fd, SOL_CAN_RAW, CAN_RAW_RECV_OWN_MSGS, &recv_own, sizeof(recv_own));
+    // Receive own messages: only opt in if the caller explicitly asked.
+    // The default kernel state is "off", so skipping the syscall when
+    // disabled avoids probe-failing on old kernels that don't recognize
+    // the option. When the caller requested it and the kernel can't
+    // honor it, fail open() rather than silently dropping is_tx echo
+    // detection — the prior code would have left frame.is_tx stuck at
+    // false with no signal to the caller.
+    if (cfg.receive_own_messages) {
+        int recv_own = 1;
+        if (::setsockopt(fd, SOL_CAN_RAW, CAN_RAW_RECV_OWN_MSGS,
+                         &recv_own, sizeof(recv_own)) < 0) {
+            recordError(std::string("CAN_RAW_RECV_OWN_MSGS not supported: ")
+                        + std::strerror(errno));
+            ::close(fd);
+            return false;
+        }
+    }
 
     // Request nanosecond-resolution kernel timestamps; we extract them
     // from the recvmsg cmsg buffer and populate Frame::timestamp_us.
-    // Non-fatal on failure — the read path falls back to steady_clock.
+    // Best-effort: if the kernel rejects it, the receive() path falls
+    // back to a system_clock host-side timestamp.
     int ts_on = 1;
-    ::setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPNS, &ts_on, sizeof(ts_on));
+    (void)::setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPNS, &ts_on, sizeof(ts_on));
 
     // Opt the socket into receiving CAN-FD frames. Old kernels or
     // non-FD-capable interfaces return an error; that's OK — the socket
@@ -537,8 +554,16 @@ bool SocketCanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) 
     }
     if (ts_us == 0) {
         // No cmsg timestamp — driver doesn't support SO_TIMESTAMPNS, or
-        // the option wasn't accepted. Synthesize a host-side timestamp.
-        ts_us = nowMicros();
+        // setsockopt was rejected at open() time. Synthesize a host-side
+        // timestamp using system_clock so the epoch matches the kernel
+        // path (SO_TIMESTAMPNS is CLOCK_REALTIME; system_clock on Linux
+        // wraps the same clock). Using steady_clock here, as the prior
+        // code did, would give Frame::timestamp_us two different epochs
+        // depending on which path executed — surprising for consumers
+        // that timestamp-correlate across frames.
+        ts_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
     }
 
     // Reset all fields; older callers may reuse the frame across calls
