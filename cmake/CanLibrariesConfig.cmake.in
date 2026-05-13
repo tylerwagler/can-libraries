@@ -8,12 +8,8 @@ include("${CMAKE_CURRENT_LIST_DIR}/CanLibrariesTargets.cmake")
 
 check_required_components(CanLibraries)
 
-# Aliases for downstream consumers. Vector_DBC / Vector_BLF / Vector_ASC
-# are vendored via submodules — when consumed via add_subdirectory the
-# aliases are set in the top-level CMakeLists.txt; this install-side
-# config is only relevant for `find_package(CanLibraries)` against an
-# installed CanLibraries, in which case the vendor libraries should be
-# installed independently and located via their own find_package.
-if(NOT TARGET CanLibraries::can)
-    add_library(CanLibraries::can ALIAS CanLibraries::libcan)
-endif()
+# The installed library target is `CanLibraries::can` directly (set via
+# EXPORT_NAME=can on the libcan target). Vector_DBC / Vector_BLF /
+# Vector_ASC are vendored via git submodules and are *not* installed as
+# part of CanLibraries; consumers of an installed CanLibraries need to
+# locate those independently if they require DBC/BLF/ASC parsing.

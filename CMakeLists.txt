@@ -1,20 +1,23 @@
 cmake_minimum_required(VERSION 3.25)
 project(CanLibraries VERSION 2.0.0 LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-
 # Detect whether we're the top-level build (a standalone CanLibraries build)
 # or being consumed via add_subdirectory() from a downstream project. When
 # consumed downstream, default examples/tests off so they don't get pulled
-# into the parent's build target list.
+# into the parent's build target list, and avoid clobbering parent-level
+# CMake settings (compile-commands export, output dirs) further down.
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     set(_CANLIBS_TOPLEVEL ON)
 else()
     set(_CANLIBS_TOPLEVEL OFF)
 endif()
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+# POSITION_INDEPENDENT_CODE moved onto the libcan target (see libcan/
+# CMakeLists.txt) so it doesn't bleed into a parent project's choice
+# when CanLibraries is consumed via add_subdirectory().
 
 # Build options
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
@@ -58,13 +61,15 @@ if(CAN_BACKEND_KVASER)
     find_package(Kvaser REQUIRED)
 endif()
 
-# Export compile commands for IDE support
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
-# Set output directories
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# Export compile commands for IDE support, and pin output layout — only
+# at top level so we don't override a parent project's choices when
+# consumed via add_subdirectory().
+if(_CANLIBS_TOPLEVEL)
+    set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
 
 # Testing — call enable_testing() BEFORE add_subdirectory so tests added
 # in subdirs register with ctest.

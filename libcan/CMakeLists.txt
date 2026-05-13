@@ -41,12 +41,32 @@ generate_export_header(libcan
 )
 
 # Hide non-exported symbols on Linux so the export surface matches Windows.
+# EXPORT_NAME=can makes the installed target `CanLibraries::can` directly
+# (the build-tree alias is already `CanLibraries::can`); without this, the
+# installed name would be `CanLibraries::libcan` and CanLibrariesConfig
+# would need to manually recreate the alias post-find_package.
+# POSITION_INDEPENDENT_CODE on the target (rather than as a global) keeps
+# the property scoped to libcan, so it works correctly even when this
+# project is consumed via add_subdirectory() from a parent that has its
+# own PIC choice.
 set_target_properties(libcan PROPERTIES
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON
+    POSITION_INDEPENDENT_CODE ON
     VERSION ${PROJECT_VERSION}
     SOVERSION 1
+    EXPORT_NAME can
 )
+
+# When built as a static library, the generated libcan_export.h's
+# LIBCAN_EXPORT macro must be a no-op for consumers — otherwise on
+# Windows it would expand to __declspec(dllimport) when downstream code
+# includes the public headers, breaking static linkage. Setting
+# LIBCAN_STATIC_DEFINE as a PUBLIC compile definition makes the macro
+# resolve to empty for both the library's own TUs and consumers.
+if(NOT BUILD_SHARED_LIBS)
+    target_compile_definitions(libcan PUBLIC LIBCAN_STATIC_DEFINE)
+endif()
 
 # Compile definitions per enabled backend.
 if(CAN_BACKEND_SOCKETCAN)
