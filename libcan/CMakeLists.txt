@@ -40,6 +40,14 @@ generate_export_header(libcan
     EXPORT_FILE_NAME ${CMAKE_CURRENT_BINARY_DIR}/include/can/libcan_export.h
 )
 
+# Generate version.h from version.h.in so LIBCAN_VERSION_* and
+# can::libraryVersion() stay locked to the project() VERSION above.
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/can/version.h.in
+    ${CMAKE_CURRENT_BINARY_DIR}/include/can/version.h
+    @ONLY
+)
+
 # Hide non-exported symbols on Linux so the export surface matches Windows.
 # EXPORT_NAME=can makes the installed target `CanLibraries::can` directly
 # (the build-tree alias is already `CanLibraries::can`); without this, the
@@ -147,6 +155,7 @@ if(CANLIB_INSTALL)
         include/can/can_types.h
         include/can/i_can_backend.h
         ${CMAKE_CURRENT_BINARY_DIR}/include/can/libcan_export.h
+        ${CMAKE_CURRENT_BINARY_DIR}/include/can/version.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/can
     )
 endif()
