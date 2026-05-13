@@ -32,10 +32,10 @@ include("${CMAKE_CURRENT_LIST_DIR}/CanLibrariesTargets.cmake")
 
 check_required_components(CanLibraries)
 
-# The installed library target is `CanLibraries::can` directly (set via
-# EXPORT_NAME=can on the libcan target). Vector_DBC / Vector_BLF /
-# Vector_ASC are vendored via git submodules and are *not* installed as
-# part of CanLibraries; consumers of an installed CanLibraries need to
-# locate those independently if they require DBC/BLF/ASC parsing.
-# In-tree (add_subdirectory) consumers get `CanLibraries::dbc`,
-# `CanLibraries::blf`, and `CanLibraries::asc` aliases automatically.
+# Installed targets exported with EXPORT_NAME aliases:
+#   CanLibraries::can  (libcan)
+#   CanLibraries::dbc  (Vector_DBC)   — when CANLIB_USE_VECTOR_DBC=ON at build time
+#   CanLibraries::blf  (Vector_BLF)   — when CANLIB_USE_VECTOR_BLF=ON
+#   CanLibraries::asc  (Vector_ASC)   — when CANLIB_USE_VECTOR_ASC=ON
+# All four targets are available whether the package was consumed via
+# add_subdirectory() or find_package() on an installed tree.

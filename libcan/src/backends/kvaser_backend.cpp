@@ -224,6 +224,15 @@ bool KvaserBackend::open(const ChannelConfig& cfg) {
 
     int flags = canOPEN_EXCLUSIVE | canOPEN_REQUIRE_INIT_ACCESS;
 
+    // Opt-in for virtual Kvaser channels (kvvirtualcan). Defaults off so
+    // a typo'd numeric channel index doesn't silently bind to a virtual
+    // channel when the user expected a USB device — virtual channels
+    // succeed but never see real traffic.
+    auto it = cfg.extra.find("kvaser_accept_virtual");
+    if (it != cfg.extra.end() && (it->second == "1" || it->second == "true")) {
+        flags |= canOPEN_ACCEPT_VIRTUAL;
+    }
+
     int h = canOpenChannel(channel, flags);
     if (h < 0) {
         recordCanError("canOpenChannel", h);

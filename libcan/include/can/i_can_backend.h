@@ -102,6 +102,16 @@ struct ChannelConfig {
     bool loopback = false;
     bool receive_own_messages = false;
     bool receive_error_frames = false;
+    /// Backend-specific opt-ins that don't fit a common field. Recognized keys:
+    ///   - "kvaser_accept_virtual" (Kvaser): "1" to allow opening virtual
+    ///     channels (canOPEN_ACCEPT_VIRTUAL). Off by default so a typo'd
+    ///     channel index doesn't silently bind to the kvvirtualcan driver.
+    ///   - "pcan_fd_bitrate" (PCAN, planned): explicit CAN-FD timing
+    ///     string ("f_clock=80000000, nom_brp=10, nom_tseg1=12, ...").
+    ///     Required once the PCAN backend's CAN-FD path lands; ignored
+    ///     for now.
+    /// Unknown keys are ignored.
+    std::map<std::string, std::string> extra;
 };
 
 /// Abstract CAN backend.

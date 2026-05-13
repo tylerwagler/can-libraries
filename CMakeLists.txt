@@ -112,20 +112,35 @@ set(_canlib_saved_build_type "${CMAKE_BUILD_TYPE}")
 # expecting to be built standalone. When consumed via add_subdirectory that
 # resolves to *our* source tree. Patch the include dirs after the fact so
 # consumers see the right paths. SYSTEM suppresses pedantic warnings from
-# their headers leaking into our builds.
+# their headers leaking into our builds. INSTALL_INTERFACE adds the
+# include base directory of the installed package so downstream
+# find_package() consumers can resolve <Vector/DBC.h>, <Vector/BLF.h>,
+# <Vector/ASC.h> after we install the headers.
 function(_canlib_fix_toby_includes target subdir)
+    include(GNUInstallDirs)
     target_include_directories(${target} SYSTEM PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/${subdir}/src>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/third_party/${subdir}/src>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     )
 endfunction()
+
+# When this project is installable (standalone build), pull the Vector
+# submodules into 'all' so `cmake --install` finds them built. When
+# consumed via add_subdirectory, the parent typically doesn't install,
+# and we keep EXCLUDE_FROM_ALL so unused submodules aren't compiled.
+if(CANLIB_INSTALL)
+    set(_canlib_subdir_extras "")
+else()
+    set(_canlib_subdir_extras "EXCLUDE_FROM_ALL")
+endif()
 
 if(CANLIB_USE_VECTOR_DBC)
     if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/Vector_DBC/CMakeLists.txt)
         message(FATAL_ERROR "Vector_DBC submodule not initialized. Run: "
             "git submodule update --init --recursive")
     endif()
-    add_subdirectory(third_party/Vector_DBC EXCLUDE_FROM_ALL)
+    add_subdirectory(third_party/Vector_DBC ${_canlib_subdir_extras})
     _canlib_fix_toby_includes(Vector_DBC Vector_DBC)
     # The Vector_DBC flex/bison-generated Scanner.cpp triggers a
     # -Wimplicit-fallthrough on modern GCC. The SYSTEM include in
@@ -136,7 +151,9 @@ if(CANLIB_USE_VECTOR_DBC)
         target_compile_options(Vector_DBC PRIVATE -Wno-implicit-fallthrough)
     endif()
     # Re-export with our namespace prefix so consumers refer to a stable
-    # alias instead of the upstream's bare target name.
+    # alias instead of the upstream's bare target name. EXPORT_NAME=dbc
+    # makes the installed target `CanLibraries::dbc` directly.
+    set_target_properties(Vector_DBC PROPERTIES EXPORT_NAME dbc)
     add_library(CanLibraries::dbc ALIAS Vector_DBC)
 endif()
 
@@ -144,7 +161,7 @@ if(CANLIB_USE_VECTOR_BLF)
     if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/Vector_BLF/CMakeLists.txt)
         message(FATAL_ERROR "Vector_BLF submodule not initialized.")
     endif()
-    add_subdirectory(third_party/Vector_BLF EXCLUDE_FROM_ALL)
+    add_subdirectory(third_party/Vector_BLF ${_canlib_subdir_extras})
     _canlib_fix_toby_includes(Vector_BLF Vector_BLF)
     # Vector_BLF v2.4.2 sources use <cstdint> typedefs (uint8_t, etc.)
     # without explicitly including the header. Modern libstdc++ no
@@ -155,7 +172,10 @@ if(CANLIB_USE_VECTOR_BLF)
         target_compile_options(Vector_BLF PRIVATE -include cstdint)
         target_compile_options(Vector_BLF PUBLIC  -include cstdint)
     endif()
-    set_target_properties(Vector_BLF PROPERTIES CXX_STANDARD 17)
+    set_target_properties(Vector_BLF PROPERTIES
+        CXX_STANDARD 17
+        EXPORT_NAME blf
+    )
     add_library(CanLibraries::blf ALIAS Vector_BLF)
 endif()
 
@@ -163,10 +183,95 @@ if(CANLIB_USE_VECTOR_ASC)
     if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/Vector_ASC/CMakeLists.txt)
         message(FATAL_ERROR "Vector_ASC submodule not initialized.")
     endif()
-    add_subdirectory(third_party/Vector_ASC EXCLUDE_FROM_ALL)
+    add_subdirectory(third_party/Vector_ASC ${_canlib_subdir_extras})
     _canlib_fix_toby_includes(Vector_ASC Vector_ASC)
+    set_target_properties(Vector_ASC PROPERTIES EXPORT_NAME asc)
     add_library(CanLibraries::asc ALIAS Vector_ASC)
 endif()
+
+# Attach the Vector submodules to our export set so consumers of an
+# installed CanLibraries can use CanLibraries::dbc / ::blf / ::asc
+# straight from find_package(CanLibraries).
+#
+# Each submodule's CMakeLists sets INTERFACE_SOURCES to its public .h
+# files as raw absolute source-dir paths. install(EXPORT) rejects that
+# (paths in exported properties must be wrapped in $<BUILD_INTERFACE:>
+# / $<INSTALL_INTERFACE:>). The submodule's own install(FILES) reads
+# INTERFACE_SOURCES at install time to know which headers to install —
+# which would fail similarly. We replace both: clear INTERFACE_SOURCES
+# (so the export is portable), and install headers explicitly via
+# install(DIRECTORY ...).
+if(CANLIB_INSTALL)
+    include(GNUInstallDirs)
+
+    foreach(_canlib_toby IN ITEMS Vector_DBC Vector_BLF Vector_ASC)
+        if(TARGET ${_canlib_toby})
+            set_target_properties(${_canlib_toby} PROPERTIES INTERFACE_SOURCES "")
+        endif()
+    endforeach()
+    unset(_canlib_toby)
+
+    if(CANLIB_USE_VECTOR_DBC)
+        install(TARGETS Vector_DBC
+            EXPORT CanLibrariesTargets
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        )
+        install(DIRECTORY third_party/Vector_DBC/src/Vector/DBC/
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/Vector/DBC
+            FILES_MATCHING PATTERN "*.h"
+        )
+        install(FILES
+            ${CMAKE_CURRENT_BINARY_DIR}/third_party/Vector_DBC/src/Vector/DBC/vector_dbc_export.h
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/Vector/DBC
+        )
+        # Top-level umbrella header (third_party/Vector_DBC/src/Vector/DBC.h)
+        install(FILES third_party/Vector_DBC/src/Vector/DBC.h
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/Vector
+        )
+    endif()
+    if(CANLIB_USE_VECTOR_BLF)
+        install(TARGETS Vector_BLF
+            EXPORT CanLibrariesTargets
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        )
+        install(DIRECTORY third_party/Vector_BLF/src/Vector/BLF/
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/Vector/BLF
+            FILES_MATCHING PATTERN "*.h"
+        )
+        install(FILES
+            ${CMAKE_CURRENT_BINARY_DIR}/third_party/Vector_BLF/src/Vector/BLF/vector_blf_export.h
+            ${CMAKE_CURRENT_BINARY_DIR}/third_party/Vector_BLF/src/Vector/BLF/config.h
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/Vector/BLF
+        )
+        install(FILES third_party/Vector_BLF/src/Vector/BLF.h
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/Vector
+        )
+    endif()
+    if(CANLIB_USE_VECTOR_ASC)
+        install(TARGETS Vector_ASC
+            EXPORT CanLibrariesTargets
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        )
+        install(DIRECTORY third_party/Vector_ASC/src/Vector/ASC/
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/Vector/ASC
+            FILES_MATCHING PATTERN "*.h"
+        )
+        install(FILES
+            ${CMAKE_CURRENT_BINARY_DIR}/third_party/Vector_ASC/src/Vector/ASC/vector_asc_export.h
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/Vector/ASC
+        )
+        install(FILES third_party/Vector_ASC/src/Vector/ASC.h
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/Vector
+        )
+    endif()
+endif()
+unset(_canlib_subdir_extras)
 
 # Restore CMAKE_BUILD_TYPE if any submodule's CMakeLists clobbered it.
 # This is a no-op today (their assignment is non-FORCE local-scope) but

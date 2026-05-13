@@ -21,6 +21,7 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -70,18 +71,17 @@ std::string extractVersion(const std::string& s) {
 }
 
 /// Call SIOCETHTOOL with ETHTOOL_GDRVINFO to retrieve driver name, kernel
-/// driver version, firmware version, and bus path.
-bool ethtoolDrvInfo(const std::string& iface, ethtool_drvinfo& out) {
-    int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) return false;
+/// driver version, firmware version, and bus path. Caller supplies an
+/// AF_INET socket fd; the helper is fd-agnostic and avoids opening one
+/// per interface inside enumerateAdapters()'s loop.
+bool ethtoolDrvInfo(int sock_fd, const std::string& iface, ethtool_drvinfo& out) {
+    if (sock_fd < 0) return false;
     ifreq ifr{};
     std::strncpy(ifr.ifr_name, iface.c_str(), IFNAMSIZ - 1);
     std::memset(&out, 0, sizeof(out));
     out.cmd = ETHTOOL_GDRVINFO;
     ifr.ifr_data = reinterpret_cast<char*>(&out);
-    int rc = ::ioctl(fd, SIOCETHTOOL, &ifr);
-    ::close(fd);
-    return rc == 0;
+    return ::ioctl(sock_fd, SIOCETHTOOL, &ifr) == 0;
 }
 
 /// Walk up from /sys/class/net/<iface>/device until we find a directory
@@ -152,20 +152,56 @@ uint64_t fnv1aHash(const uint8_t* data, std::size_t len) {
     return h;
 }
 
+/// Return the running kernel's release string (uname.release), cached on
+/// first call. Used to recognize when ethtool's per-driver "version"
+/// field is actually just the kernel release — which is the default for
+/// in-tree drivers that don't set MODULE_VERSION (peak_usb, kvaser_usb,
+/// vcan...). In that case we want to surface the kernel string as the
+/// kernel version, not pretend it's a driver-specific version.
+const std::string& kernelRelease() {
+    static const std::string r = [] {
+        struct utsname u{};
+        if (uname(&u) == 0) return std::string(u.release);
+        return std::string{};
+    }();
+    return r;
+}
+
 /// Build a fully-populated AdapterInfo for a SocketCAN interface name.
-AdapterInfo buildSocketCanInfo(const std::string& iface) {
+/// If `sock_fd` is >= 0, it is reused for the SIOCETHTOOL call; otherwise
+/// a one-shot AF_INET socket is opened and closed internally. The shared
+/// fd path is what enumerateAdapters() uses so a 32-iface enumeration
+/// doesn't spin up 32 sockets.
+AdapterInfo buildSocketCanInfo(const std::string& iface, int sock_fd = -1) {
     AdapterInfo a;
     a.backend = BackendKind::SocketCan;
     a.channel_id = iface;
     a.device_name = iface;       // overwritten below if we can do better
     a.driver_version = "Linux SocketCAN";
 
-    ethtool_drvinfo drv{};
-    if (ethtoolDrvInfo(iface, drv)) {
-        if (drv.driver[0])     a.extra["kernel_driver"] = drv.driver;
-        if (drv.version[0])    a.driver_version = drv.version;
-        if (drv.fw_version[0]) a.firmware_version = drv.fw_version;
-        if (drv.bus_info[0])   a.extra["bus_path"] = drv.bus_info;
+    const bool own_fd = (sock_fd < 0);
+    if (own_fd) sock_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock_fd >= 0) {
+        ethtool_drvinfo drv{};
+        if (ethtoolDrvInfo(sock_fd, iface, drv)) {
+            if (drv.driver[0])     a.extra["kernel_driver"] = drv.driver;
+            if (drv.version[0]) {
+                // In-tree drivers without MODULE_VERSION report the
+                // kernel release here. Move it to extra.kernel_version
+                // instead of pretending it's a driver version — leaves
+                // a.driver_version at its sensible "Linux SocketCAN"
+                // default so UIs aren't lying.
+                const std::string& kr = kernelRelease();
+                if (!kr.empty() && drv.version == kr) {
+                    a.extra["kernel_version"] = drv.version;
+                } else {
+                    a.driver_version = drv.version;
+                }
+            }
+            if (drv.fw_version[0]) a.firmware_version = drv.fw_version;
+            if (drv.bus_info[0])   a.extra["bus_path"] = drv.bus_info;
+        }
+        if (own_fd) ::close(sock_fd);
     }
 
     fillFromUsbDir(a, findUsbDeviceDir(iface));
@@ -201,6 +237,12 @@ std::vector<AdapterInfo> SocketCanBackend::enumerateAdapters() {
     DIR* d = opendir("/sys/class/net");
     if (!d) return adapters;
 
+    // One ioctl socket reused across every interface in the loop. The
+    // previous code opened+closed a fresh AF_INET socket per iface inside
+    // ethtoolDrvInfo() — fine for a handful of CAN ports, less fine on
+    // systems with dozens of network interfaces being scanned each refresh.
+    const int sock_fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+
     // Match common CAN interface naming conventions: kernel native (can*),
     // virtual CAN (vcan*), and serial-line CAN (slcan*). Anything more
     // exotic the user can still pass directly to open() — this filter
@@ -213,9 +255,10 @@ std::vector<AdapterInfo> SocketCanBackend::enumerateAdapters() {
         if (!starts_with(name, "can") &&
             !starts_with(name, "vcan") &&
             !starts_with(name, "slcan")) continue;
-        adapters.push_back(buildSocketCanInfo(name));
+        adapters.push_back(buildSocketCanInfo(name, sock_fd));
     }
     closedir(d);
+    if (sock_fd >= 0) ::close(sock_fd);
 
     // Stable order so UI dropdowns don't shuffle.
     std::sort(adapters.begin(), adapters.end(),
@@ -457,11 +500,13 @@ bool SocketCanBackend::send(const Frame& frame) {
 
 void SocketCanBackend::pushRecentTx(const Frame& frame) {
     // Echoes typically arrive within sub-millisecond; 200ms is a generous
-    // window that still bounds memory. The deque is also capped by entry
-    // count below, so a flood of unmatched TX (e.g. RECV_OWN was turned
-    // off after open()) can't grow it unbounded.
+    // window that still bounds memory. Time-based expiry naturally caps
+    // the deque size: at sustained TX rate R it stabilizes around
+    // R * 200ms entries (e.g. 2000 entries at 10kHz). The previous hard
+    // 256-entry cap would drop the oldest unmatched-echo entry early at
+    // anything above ~1.3kHz TX, causing is_tx misattribution on later
+    // bursts; removing it makes high-rate TX echo attribution reliable.
     constexpr uint64_t kEchoWindowUs = 200'000;
-    constexpr std::size_t kMaxEntries = 256;
 
     const uint64_t now = nowMicros();
     RecentTx entry;
@@ -472,12 +517,9 @@ void SocketCanBackend::pushRecentTx(const Frame& frame) {
     entry.deadline_us = now + kEchoWindowUs;
 
     std::lock_guard<std::mutex> lock(recent_tx_mutex_);
-    // Drop expired entries from the front (deque is roughly time-ordered
-    // since deadlines all use the same offset).
+    // Drop expired entries from the front (deque is time-ordered since
+    // every push uses the same kEchoWindowUs offset).
     while (!recent_tx_.empty() && recent_tx_.front().deadline_us < now) {
-        recent_tx_.pop_front();
-    }
-    if (recent_tx_.size() >= kMaxEntries) {
         recent_tx_.pop_front();
     }
     recent_tx_.push_back(entry);

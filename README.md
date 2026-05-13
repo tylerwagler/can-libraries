@@ -24,11 +24,10 @@ Components:
 
   Initialize after cloning: `git submodule update --init --recursive`.
 
-  These aliases are available to **in-tree consumers** (via
-  `add_subdirectory(can-libraries)`). They are *not* installed as part of
-  `cmake --install` and so are not visible via
-  `find_package(CanLibraries)`. A downstream project that needs DBC/BLF/
-  ASC after install must vendor those submodules itself.
+  These targets are available both to in-tree consumers (via
+  `add_subdirectory(can-libraries)`) and to downstream projects that use
+  the installed package via `find_package(CanLibraries)` — `cmake
+  --install` ships their binaries and headers under our export set.
 
 ## Layout
 
