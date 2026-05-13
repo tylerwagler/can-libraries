@@ -44,14 +44,23 @@ jobs:
 
       - name: Set up vcan0 (for SocketCAN integration test)
         run: |
-          sudo modprobe vcan
-          sudo ip link add dev vcan0 type vcan
-          # mtu 72 = CAN-FD frame size; required for the FD round-trip
-          # case in test_socketcan_live. Classic-only frames work at the
-          # default mtu (16) but we want FD coverage in CI.
-          sudo ip link set vcan0 mtu 72
-          sudo ip link set up vcan0
-          ip link show vcan0
+          # GitHub's ubuntu-24.04 Azure kernel base image ships without the
+          # vcan module; pulling linux-modules-extra-<release> adds it.
+          # If that package isn't available for the runner's kernel, fall
+          # back gracefully — test_socketcan_live.cpp checks for vcan0 and
+          # exits 77 (CTest "skip") when absent.
+          sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
+          if sudo modprobe vcan 2>/dev/null; then
+            sudo ip link add dev vcan0 type vcan
+            # mtu 72 = CAN-FD frame size; required for the FD round-trip
+            # case in test_socketcan_live. Classic-only frames work at the
+            # default mtu (16) but we want FD coverage in CI.
+            sudo ip link set vcan0 mtu 72
+            sudo ip link set up vcan0
+            ip link show vcan0
+          else
+            echo "::warning::vcan module unavailable on this runner; SocketCanLiveTest will skip"
+          fi
 
       - name: Configure
         env:
@@ -91,10 +100,14 @@ jobs:
 
       - name: Set up vcan0
         run: |
-          sudo modprobe vcan
-          sudo ip link add dev vcan0 type vcan
-          sudo ip link set vcan0 mtu 72
-          sudo ip link set up vcan0
+          sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
+          if sudo modprobe vcan 2>/dev/null; then
+            sudo ip link add dev vcan0 type vcan
+            sudo ip link set vcan0 mtu 72
+            sudo ip link set up vcan0
+          else
+            echo "::warning::vcan module unavailable on this runner; SocketCanLiveTest will skip"
+          fi
 
       - name: Configure with -fsanitize=address,undefined
         env:
@@ -140,10 +153,14 @@ jobs:
 
       - name: Set up vcan0
         run: |
-          sudo modprobe vcan
-          sudo ip link add dev vcan0 type vcan
-          sudo ip link set vcan0 mtu 72
-          sudo ip link set up vcan0
+          sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
+          if sudo modprobe vcan 2>/dev/null; then
+            sudo ip link add dev vcan0 type vcan
+            sudo ip link set vcan0 mtu 72
+            sudo ip link set up vcan0
+          else
+            echo "::warning::vcan module unavailable on this runner; SocketCanLiveTest will skip"
+          fi
 
       - name: Configure (static)
         run: |
