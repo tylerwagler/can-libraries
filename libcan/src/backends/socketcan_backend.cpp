@@ -227,6 +227,16 @@ bool SocketCanBackend::open(const ChannelConfig& cfg) {
         recordError("Empty channel_id");
         return false;
     }
+    // SocketCAN interface names live in ifreq::ifr_name, which is
+    // IFNAMSIZ bytes including the trailing NUL. Without this check
+    // strncpy() below silently truncates a too-long name, and we'd
+    // either fail to find the interface (best case) or end up bound
+    // to a *different* interface that happens to be a prefix.
+    if (cfg.channel_id.size() >= IFNAMSIZ) {
+        recordError("channel_id too long (max " + std::to_string(IFNAMSIZ - 1)
+                    + " chars): " + cfg.channel_id);
+        return false;
+    }
 
     int fd = ::socket(PF_CAN, SOCK_RAW, CAN_RAW);
     if (fd < 0) {

@@ -129,6 +129,14 @@ int main() {
     CHECK(can::parseBitrate("250000") == 250'000, "parse plain decimal");
     CHECK(can::parseBitrate("") == 0, "parse empty");
     CHECK(can::parseBitrate("garbage") == 0, "parse garbage");
+    // Out-of-range: pre-clamp these would have invoked UB on the
+    // static_cast<uint32_t> step. Now they return 0 (the "invalid"
+    // sentinel), same as unparseable input.
+    CHECK(can::parseBitrate("99999999999") == 0, "parse value > UINT32_MAX returns 0");
+    CHECK(can::parseBitrate("5M") == 5'000'000, "parse 5M (in range)");
+    CHECK(can::parseBitrate("5000M") == 0, "parse 5000M (5e9 > UINT32_MAX) returns 0");
+    CHECK(can::parseBitrate("-500k") == 0, "parse negative returns 0");
+    CHECK(can::parseBitrate("4294967295") == 4'294'967'295u, "parse UINT32_MAX exactly");
 
     std::printf("\nBitrate formatting:\n");
     CHECK(can::formatBitrate(1'000'000) == "1 Mbps", "format 1M");

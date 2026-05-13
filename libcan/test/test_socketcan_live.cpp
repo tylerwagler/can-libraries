@@ -180,6 +180,23 @@ int main() {
 
     backend->close();
 
+    std::printf("\nchannel_id length validation:\n");
+    {
+        // SocketCAN interface names cap at IFNAMSIZ-1 chars. The backend
+        // should reject anything longer at open() time with a clear
+        // error, instead of silently truncating into a different
+        // interface (or none) via the strncpy() that follows.
+        auto bad_backend = can::ICanBackend::create(can::BackendKind::SocketCan);
+        can::ChannelConfig bad_cfg;
+        // 32 chars — well over IFNAMSIZ-1 (15 on Linux).
+        bad_cfg.channel_id = "this_name_is_way_too_long_for_can";
+        bad_cfg.bitrate = 500000;
+        CHECK(!bad_backend->open(bad_cfg), "open() rejects too-long channel_id");
+        const std::string err = bad_backend->lastError();
+        CHECK(err.find("too long") != std::string::npos,
+              "lastError() mentions length");
+    }
+
     std::printf("\nclose() wakes a receive() blocked in select():\n");
     {
         // Regression guard for the M-1 thread-safety work: close() must

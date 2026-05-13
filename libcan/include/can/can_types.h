@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <string>
 
 namespace can {
@@ -83,7 +84,9 @@ inline bool isExtId(uint32_t id) {
 }
 
 /// Parse a bitrate string into bits per second. Accepts "125k", "500K",
-/// "1M", or a plain decimal integer. Returns 0 if unparseable.
+/// "1M", or a plain decimal integer. Returns 0 if unparseable, negative,
+/// or out of range for uint32_t — callers should treat 0 as "invalid"
+/// (no real CAN bus runs at 0 bps).
 inline uint32_t parseBitrate(const std::string& bitrate) {
     if (bitrate.empty()) return 0;
     char* end = nullptr;
@@ -92,7 +95,12 @@ inline uint32_t parseBitrate(const std::string& bitrate) {
     while (*end == ' ') ++end;
     if (*end == 'k' || *end == 'K') v *= 1000.0;
     else if (*end == 'M' || *end == 'm') v *= 1'000'000.0;
-    return v < 0 ? 0 : static_cast<uint32_t>(v);
+    // Clamp before cast: casting an out-of-range double to uint32_t is
+    // undefined behavior pre-C++20 (implementation-defined since) and
+    // can wrap, saturate, or produce garbage depending on the compiler.
+    constexpr double kMax = static_cast<double>(std::numeric_limits<uint32_t>::max());
+    if (v < 0.0 || v > kMax) return 0;
+    return static_cast<uint32_t>(v);
 }
 
 /// Format a bitrate as a human-readable string ("500 kbps", "1 Mbps").
