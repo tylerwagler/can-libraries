@@ -119,6 +119,131 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: ctest --output-on-failure
 
+  static-build:
+    name: Static build — BUILD_SHARED_LIBS=OFF
+    runs-on: ubuntu-24.04
+    # Locks in the L-6 cleanup: a static libcan + installed config must
+    # export INTERFACE_LINK_LIBRARIES correctly for downstream consumers.
+    # If a future change forgets to wrap a vendor SDK find_dependency in
+    # CanLibrariesConfig.cmake.in, this job's install-and-find-package
+    # leg will fail at configure.
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build flex bison zlib1g-dev
+
+      - name: Set up vcan0
+        run: |
+          sudo modprobe vcan
+          sudo ip link add dev vcan0 type vcan
+          sudo ip link set vcan0 mtu 72
+          sudo ip link set up vcan0
+
+      - name: Configure (static)
+        run: |
+          cmake -S . -B build \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCAN_BACKEND_SOCKETCAN=ON \
+            -DCMAKE_INSTALL_PREFIX=$PWD/install
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure
+
+      - name: Install
+        run: cmake --install build
+
+      - name: Verify installed package via find_package
+        run: |
+          mkdir -p consumer && cd consumer
+          cat > CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.25)
+          project(downstream LANGUAGES CXX)
+          set(CMAKE_CXX_STANDARD 17)
+          find_package(CanLibraries REQUIRED)
+          add_executable(consumer main.cpp)
+          target_link_libraries(consumer PRIVATE CanLibraries::can)
+          EOF
+          cat > main.cpp <<'EOF'
+          #include "can/i_can_backend.h"
+          int main() {
+              auto kinds = can::ICanBackend::availableBackends();
+              return kinds.empty() ? 1 : 0;
+          }
+          EOF
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_PREFIX_PATH=$GITHUB_WORKSPACE/install
+          cmake --build build
+          ./build/consumer
+
+  add-subdirectory-consumer:
+    name: Downstream — add_subdirectory consumer
+    runs-on: ubuntu-24.04
+    # Mirrors how Qt_Template and other Crane apps pull in can-libraries.
+    # Regression guard against breaking the _CANLIBS_TOPLEVEL detection
+    # or the build-tree aliases (CanLibraries::can / ::dbc).
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          path: can-libraries
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build flex bison zlib1g-dev
+
+      - name: Configure downstream consumer
+        run: |
+          mkdir -p parent && cd parent
+          cat > CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.25)
+          project(parent LANGUAGES CXX)
+          set(CMAKE_CXX_STANDARD 20)
+          add_subdirectory(${CMAKE_SOURCE_DIR}/../can-libraries can-libraries)
+          add_executable(parent_app main.cpp)
+          target_link_libraries(parent_app PRIVATE CanLibraries::can CanLibraries::dbc)
+          EOF
+          cat > main.cpp <<'EOF'
+          #include "can/i_can_backend.h"
+          #include <Vector/DBC.h>
+          int main() {
+              auto kinds = can::ICanBackend::availableBackends();
+              Vector::DBC::Network n;
+              return kinds.empty() ? 1 : 0;
+          }
+          EOF
+          cmake -S . -B build -G Ninja
+          cmake --build build --parallel
+
+      - name: Confirm subdir build skipped CanLibraries' own tests
+        # When consumed via add_subdirectory, BUILD_TESTING and
+        # CANLIB_BUILD_EXAMPLES default OFF — so the parent's build target
+        # list should contain parent_app but not test_backend.
+        working-directory: parent/build
+        run: |
+          if [ -e bin/test_backend ]; then
+            echo "::error::test_backend built under add_subdirectory consumption (should be OFF by default)"
+            exit 1
+          fi
+          if [ -e bin/backend_example ]; then
+            echo "::error::backend_example built under add_subdirectory consumption (should be OFF by default)"
+            exit 1
+          fi
+          echo "OK: tests + examples correctly suppressed in subdir consumption."
+
   vector-backend-gate:
     name: Regression guard — CAN_BACKEND_VECTOR=ON must fail configure
     runs-on: ubuntu-24.04
