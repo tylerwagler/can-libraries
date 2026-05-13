@@ -39,6 +39,7 @@ jobs:
             cmake \
             ninja-build \
             flex \
+            libfl-dev \
             bison \
             zlib1g-dev
 
@@ -95,6 +96,7 @@ jobs:
             cmake \
             ninja-build \
             flex \
+            libfl-dev \
             bison \
             zlib1g-dev
 
@@ -149,7 +151,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build flex bison zlib1g-dev
+          sudo apt-get install -y cmake ninja-build flex libfl-dev bison zlib1g-dev
 
       - name: Set up vcan0
         run: |
@@ -220,7 +222,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build flex bison zlib1g-dev
+          sudo apt-get install -y cmake ninja-build flex libfl-dev bison zlib1g-dev
 
       - name: Configure downstream consumer
         run: |
