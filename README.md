@@ -126,21 +126,66 @@ backend->close();
 `WaitForSingleObject`) until a frame arrives or the timeout expires —
 no polling.
 
-**Thread safety.** `open()` and `close()` are lifecycle methods: they
-must not run concurrently with each other or with `send` / `receive` /
-`status` / `info` / `lastError`. Once `open()` has returned successfully
-and until `close()` is called:
+### CAN-FD
 
-- `send()` is safe to call from multiple threads concurrently.
+CAN-FD is end-to-end on `SocketCanBackend` only (PCAN and Kvaser
+backends compile but currently advertise `supports_can_fd = false`; see
+`BackendCapabilities`). The CAN interface itself must be FD-configured
+before `open()`:
+
+```sh
+# Real CAN device:
+sudo ip link set can0 type can bitrate 500000 dbitrate 2000000 fd on
+# Or a virtual CAN test bus:
+sudo ip link set vcan0 mtu 72
+```
+
+Once that's done, set the FD fields on the `Frame`:
+
+```cpp
+can::Frame fd_frame;
+fd_frame.id          = 0x456;
+fd_frame.dlc         = 16;        // any valid FD byte-count:
+                                   // 0..8, 12, 16, 20, 24, 32, 48, 64
+fd_frame.is_fd_frame = true;
+fd_frame.is_brs      = true;      // bit-rate switch (data phase at dbitrate)
+for (uint8_t i = 0; i < 16; ++i) fd_frame.data[i] = i;
+backend->send(fd_frame);
+
+can::Frame rx;
+if (backend->receive(rx, std::chrono::milliseconds(100)) && rx.is_fd_frame) {
+    // rx.dlc up to 64; rx.is_brs / rx.is_esi populated from the FD flags.
+}
+```
+
+`ChannelConfig::data_bitrate` is currently informational on SocketCAN
+(the kernel sets up bitrate via netlink, not setsockopt); set it for
+forward-compat with future backends and as documentation of intent.
+
+### Thread safety
+
+Once `open()` has returned successfully:
+
+- `send()` is safe to call concurrently from multiple threads.
 - `receive()` must be called from a single thread at a time.
 - `status()`, `info()`, `lastError()` are safe to call alongside the above.
 
-`SocketCanBackend::close()` calls `shutdown(2)` on the underlying CAN
-socket before closing it, so a `receive()` blocked in `select()` on a
-worker thread returns promptly when the owner tears the backend down —
-provided the owner has signalled the worker to stop and then joins it
-*after* `close()`. Racing a syscall against `close()` remains undefined;
-the contract above is the supported pattern.
+`close()` is supported while another thread is blocked in `receive()`.
+The SocketCAN backend signals a sideband eventfd from `close()` to wake
+the `select()` immediately, so the blocked receive returns `false`
+instead of waiting out its timeout. Supported teardown:
+
+1. main thread calls `close()` — interrupts any in-flight `receive()`,
+   and from this point on `send`/`receive` return immediately with a
+   failure.
+2. main thread joins worker thread(s) — they exit their `receive()`
+   loops cleanly.
+3. destructor or next `open()` runs.
+
+`send()` racing `close()` is best-effort: it may complete before
+`close()` reclaims the fd, or fail with `EBADF` / a generic write
+error. `open()` itself must not race `close()` or any operational
+method.
 
 For Qt apps, use the `qt_template` library on top of libcan rather than
 calling `ICanBackend` directly — it provides a worker-thread-based

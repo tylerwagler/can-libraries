@@ -96,14 +96,17 @@ set(OPTION_USE_GCOV        OFF CACHE BOOL "" FORCE)
 set(OPTION_USE_GPROF       OFF CACHE BOOL "" FORCE)
 set(OPTION_ADD_LCOV        OFF CACHE BOOL "" FORCE)
 
-# Each submodule's CMakeLists writes `set(CMAKE_BUILD_TYPE Release)` at
-# the top — that's a non-cache local set, so it doesn't actually clobber
-# our cached value. We rely on that subtlety; if a future Toby release
-# strengthens that to FORCE we'll need to wrap the add_subdirectory.
-
+# Each Toby submodule's CMakeLists.txt writes `set(CMAKE_BUILD_TYPE
+# Release)` at the top. Today that's a non-cache local-scope assignment
+# so our cached value survives unscathed, but if a future upstream
+# release strengthens that to ... CACHE STRING ... FORCE) it would
+# clobber the user's choice. Snapshot before the add_subdirectory()
+# calls and restore after — defensive, no cost when untriggered.
 option(CANLIB_USE_VECTOR_DBC "Build/expose third_party Vector_DBC" ON)
 option(CANLIB_USE_VECTOR_BLF "Build/expose third_party Vector_BLF" ON)
 option(CANLIB_USE_VECTOR_ASC "Build/expose third_party Vector_ASC" ON)
+
+set(_canlib_saved_build_type "${CMAKE_BUILD_TYPE}")
 
 # Helper: each Toby submodule's CMakeLists references ${CMAKE_SOURCE_DIR}/src
 # expecting to be built standalone. When consumed via add_subdirectory that
@@ -156,6 +159,15 @@ if(CANLIB_USE_VECTOR_ASC)
     _canlib_fix_toby_includes(Vector_ASC Vector_ASC)
     add_library(CanLibraries::asc ALIAS Vector_ASC)
 endif()
+
+# Restore CMAKE_BUILD_TYPE if any submodule's CMakeLists clobbered it.
+# This is a no-op today (their assignment is non-FORCE local-scope) but
+# guards against a future upstream change.
+if(NOT "${_canlib_saved_build_type}" STREQUAL "${CMAKE_BUILD_TYPE}")
+    set(CMAKE_BUILD_TYPE "${_canlib_saved_build_type}"
+        CACHE STRING "" FORCE)
+endif()
+unset(_canlib_saved_build_type)
 
 # Examples — opt out when consumed downstream.
 if(CANLIB_BUILD_EXAMPLES)
