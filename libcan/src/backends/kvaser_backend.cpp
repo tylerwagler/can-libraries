@@ -179,7 +179,9 @@ std::vector<AdapterInfo> KvaserBackend::enumerateAdapters() {
 }
 
 bool KvaserBackend::open(const ChannelConfig& cfg) {
-    if (handle_ >= 0) {
+    // open() is a lifecycle method — by contract callers serialize it
+    // against close() and the operational methods, so a plain load is fine.
+    if (handle_.load(std::memory_order_acquire) >= 0) {
         recordError("Kvaser backend already open");
         return false;
     }
@@ -253,23 +255,31 @@ bool KvaserBackend::open(const ChannelConfig& cfg) {
         return false;
     }
 
-    handle_ = h;
     channel_index_ = channel;
     config_ = cfg;
     info_ = buildAdapterInfo(channel);
+    // Release-store last so operational threads observing handle_ >= 0 are
+    // guaranteed to see the channel_index_/config_/info_ writes above it.
+    handle_.store(h, std::memory_order_release);
     return true;
 }
 
 void KvaserBackend::close() {
-    if (handle_ >= 0) {
-        canBusOff(handle_);
-        canClose(handle_);
-        handle_ = -1;
+    // Exchange the handle to -1 *before* tearing the SDK side down — any
+    // concurrent send/receive/status that loads the handle here-on sees -1
+    // and bails before it can hand a stale handle to canWrite/canReadWait.
+    // The exchange also makes close() idempotent: a second call gets -1
+    // back and skips the syscalls.
+    int h = handle_.exchange(-1, std::memory_order_acq_rel);
+    if (h >= 0) {
+        canBusOff(h);
+        canClose(h);
     }
 }
 
 bool KvaserBackend::send(const Frame& frame) {
-    if (handle_ < 0) {
+    const int h = handle_.load(std::memory_order_acquire);
+    if (h < 0) {
         recordError("send() on closed Kvaser backend");
         return false;
     }
@@ -287,7 +297,7 @@ bool KvaserBackend::send(const Frame& frame) {
     // hand us a value larger than the data array. canWrite reads `dlc`
     // bytes from the buffer.
     const uint8_t dlc = frame.dlc > MAX_CAN_DLC ? MAX_CAN_DLC : frame.dlc;
-    canStatus st = canWrite(handle_, static_cast<long>(frame.id),
+    canStatus st = canWrite(h, static_cast<long>(frame.id),
                             const_cast<uint8_t*>(frame.data.data()),
                             dlc, flags);
     if (st != canOK) {
@@ -298,7 +308,8 @@ bool KvaserBackend::send(const Frame& frame) {
 }
 
 bool KvaserBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
-    if (handle_ < 0) return false;
+    const int h = handle_.load(std::memory_order_acquire);
+    if (h < 0) return false;
 
     long id = 0;
     // Sized for CAN-FD even though we don't yet open channels in FD mode:
@@ -312,7 +323,7 @@ bool KvaserBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
 
     // canReadWait blocks the caller in the kernel until a frame arrives
     // or the timeout expires — event-driven, not polling.
-    canStatus st = canReadWait(handle_, &id, data, &dlc, &flags, &ts_ms,
+    canStatus st = canReadWait(h, &id, data, &dlc, &flags, &ts_ms,
                                static_cast<unsigned long>(timeout.count()));
     if (st == canERR_NOMSG) return false;
     if (st != canOK) {
@@ -341,13 +352,14 @@ ChannelStatus KvaserBackend::status() const {
     s.bus_load_percent = -1.0;
     s.rx_queue_overruns = rx_overruns_.load();
 
-    if (handle_ < 0) {
+    const int h = handle_.load(std::memory_order_acquire);
+    if (h < 0) {
         s.bus_state = BusState::Unknown;
         return s;
     }
 
     unsigned long flags = 0;
-    if (canReadStatus(handle_, &flags) == canOK) {
+    if (canReadStatus(h, &flags) == canOK) {
         if (flags & canSTAT_BUS_OFF)              s.bus_state = BusState::BusOff;
         else if (flags & canSTAT_ERROR_PASSIVE)   s.bus_state = BusState::ErrorPassive;
         else if (flags & canSTAT_ERROR_WARNING)   s.bus_state = BusState::ErrorWarning;
@@ -356,7 +368,7 @@ ChannelStatus KvaserBackend::status() const {
     }
 
     unsigned int tx_err = 0, rx_err = 0, ovrn = 0;
-    if (canReadErrorCounters(handle_, &tx_err, &rx_err, &ovrn) == canOK) {
+    if (canReadErrorCounters(h, &tx_err, &rx_err, &ovrn) == canOK) {
         s.tx_error_counter = tx_err;
         s.rx_error_counter = rx_err;
         s.bus_errors = ovrn;
@@ -365,8 +377,11 @@ ChannelStatus KvaserBackend::status() const {
 }
 
 AdapterInfo KvaserBackend::info() const {
-    if (channel_index_ < 0) return info_;
-    return buildAdapterInfo(channel_index_);
+    // info_ is captured at open() time by buildAdapterInfo(), which makes
+    // multiple canGetChannelData syscalls. The static fields (firmware,
+    // serial, EAN) don't change at runtime, so caching is safe; consumers
+    // that need live status should call status() instead.
+    return info_;
 }
 
 std::string KvaserBackend::lastError() const {

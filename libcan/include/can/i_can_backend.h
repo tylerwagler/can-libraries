@@ -122,21 +122,33 @@ struct ChannelConfig {
 ///       with each other and with send/receive.
 ///
 ///   close() *may* be called while another thread is blocked in
-///   receive(). The blocked receive() returns false promptly — the
-///   kernel-fd backends (currently SocketCAN) use a sideband eventfd
-///   to wake their select(), so the worker doesn't wait out its
-///   timeout. The supported teardown pattern is:
-///     1. main thread calls close() — interrupts any in-flight
-///        receive(), and from this point on send()/receive() return
-///        immediately with a failure
+///   receive(). The supported teardown pattern is:
+///     1. main thread calls close() — from this point on send()/
+///        receive() return immediately with a failure
 ///     2. main thread joins the worker thread(s) (which return from
 ///        their last receive() and exit their loops)
 ///     3. destructor or next open() runs
+///
+///   How quickly close() unblocks an in-flight receive() is BACKEND-
+///   SPECIFIC:
+///     - SocketCanBackend: prompt. Uses a sideband eventfd in select()
+///       so close() wakes a blocked worker within a scheduler quantum.
+///     - PcanBackend / KvaserBackend: NOT prompt. close() invalidates
+///       the SDK handle, but a worker already inside WaitForSingleObject
+///       / canReadWait waits out its full timeout before returning.
+///       Workers on these backends should be invoked with a short
+///       receive() timeout (e.g. 100ms) so close() + join() returns
+///       inside that bound. (Prompt-wakeup support is tracked but not
+///       yet wired through these vendor SDKs.)
 ///
 ///   send() racing close() is best-effort: it may succeed if the
 ///   syscall completes before close() reclaims the fd, or fail with
 ///   EBADF / a generic write error. After close() returns, no new
 ///   send()/receive() may be initiated.
+///
+/// lastError() is sticky — it retains the most recent error string
+/// even after subsequent operations succeed. Consult it only on a
+/// false return from the call you care about.
 class LIBCAN_EXPORT ICanBackend {
 public:
     virtual ~ICanBackend() = default;

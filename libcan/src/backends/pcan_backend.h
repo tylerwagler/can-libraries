@@ -33,7 +33,7 @@ public:
 
     bool open(const ChannelConfig& cfg) override;
     void close() override;
-    bool isOpen() const override { return channel_handle_ != 0; }
+    bool isOpen() const override { return channel_handle_.load(std::memory_order_acquire) != 0; }
 
     bool send(const Frame& frame) override;
     bool receive(Frame& frame, std::chrono::milliseconds timeout) override;
@@ -51,11 +51,16 @@ private:
     static bool mapBitrate(uint32_t bps, uint16_t& out_btr0btr1);
     static AdapterInfo buildAdapterInfo(uint16_t handle);
 
-    /// PCAN channel handle (TPCANHandle). 0 means closed.
-    /// Stored as plain integer so the public header doesn't need PCANBasic.h.
-    uint16_t channel_handle_ = 0;
-    int receive_fd_ = -1;          ///< Linux only; -1 on Windows or if not retrieved
-    void* receive_handle_ = nullptr; ///< Windows only; HANDLE for WaitForSingleObject
+    /// PCAN channel handle (TPCANHandle). 0 means closed. Held atomic so
+    /// send()/receive()/status() loads against the exchange-to-0 in close()
+    /// are well-defined per the threading contract in i_can_backend.h.
+    /// close() exchanges to 0 *before* calling CAN_Uninitialize so a later
+    /// operational load sees the closed state and bails before reaching the
+    /// SDK with a stale handle. Stored as plain integer so the public
+    /// header doesn't need PCANBasic.h.
+    std::atomic<uint16_t> channel_handle_{0};
+    std::atomic<int>      receive_fd_{-1};      ///< Linux only; -1 on Windows or if not retrieved
+    std::atomic<void*>    receive_handle_{nullptr}; ///< Windows only; HANDLE for WaitForSingleObject
 
     ChannelConfig config_;
     AdapterInfo info_;

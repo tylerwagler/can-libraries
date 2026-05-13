@@ -34,7 +34,7 @@ public:
 
     bool open(const ChannelConfig& cfg) override;
     void close() override;
-    bool isOpen() const override { return handle_ >= 0; }
+    bool isOpen() const override { return handle_.load(std::memory_order_acquire) >= 0; }
 
     bool send(const Frame& frame) override;
     bool receive(Frame& frame, std::chrono::milliseconds timeout) override;
@@ -49,10 +49,15 @@ private:
     void recordCanError(const std::string& context, int can_status);
     static AdapterInfo buildAdapterInfo(int channel);
 
-    /// Kvaser canHandle. -1 means closed. Stored as int so the public
-    /// header doesn't depend on canlib.h.
-    int handle_ = -1;
-    int channel_index_ = -1;
+    /// Kvaser canHandle. -1 means closed. Held atomic so send()/receive()/
+    /// status() loads against the exchange-to-(-1) in close() are
+    /// well-defined per the threading contract in i_can_backend.h.
+    /// close() exchanges to -1 *before* canBusOff/canClose, so a later
+    /// operational load sees the closed state and bails before reaching
+    /// the SDK with a stale handle. Stored as int so the public header
+    /// doesn't depend on canlib.h.
+    std::atomic<int> handle_{-1};
+    int channel_index_ = -1;  ///< Set in open(), read only by info() — guarded by the open/close lifecycle
 
     ChannelConfig config_;
     AdapterInfo info_;

@@ -24,6 +24,12 @@ Components:
 
   Initialize after cloning: `git submodule update --init --recursive`.
 
+  These aliases are available to **in-tree consumers** (via
+  `add_subdirectory(can-libraries)`). They are *not* installed as part of
+  `cmake --install` and so are not visible via
+  `find_package(CanLibraries)`. A downstream project that needs DBC/BLF/
+  ASC after install must vendor those submodules itself.
+
 ## Layout
 
 ```
@@ -171,21 +177,36 @@ Once `open()` has returned successfully:
 - `status()`, `info()`, `lastError()` are safe to call alongside the above.
 
 `close()` is supported while another thread is blocked in `receive()`.
-The SocketCAN backend signals a sideband eventfd from `close()` to wake
-the `select()` immediately, so the blocked receive returns `false`
-instead of waiting out its timeout. Supported teardown:
+Supported teardown:
 
-1. main thread calls `close()` — interrupts any in-flight `receive()`,
-   and from this point on `send`/`receive` return immediately with a
-   failure.
+1. main thread calls `close()` — from this point on `send`/`receive`
+   return immediately with a failure.
 2. main thread joins worker thread(s) — they exit their `receive()`
    loops cleanly.
 3. destructor or next `open()` runs.
+
+How quickly `close()` unblocks a blocked `receive()` is **backend-
+specific**:
+
+- **`SocketCanBackend`** — prompt (within a scheduler quantum).
+  `close()` signals a sideband eventfd that wakes the `select()`
+  immediately. The receive returns `false` instead of waiting out
+  its timeout.
+- **`PcanBackend` / `KvaserBackend`** — **not** prompt. `close()`
+  invalidates the SDK handle, but a worker already inside
+  `WaitForSingleObject` / `canReadWait` waits out its full timeout
+  before returning. Workers on these backends should be invoked
+  with a short `receive()` timeout (e.g. 100 ms) so the
+  `close() + join()` returns inside that bound.
 
 `send()` racing `close()` is best-effort: it may complete before
 `close()` reclaims the fd, or fail with `EBADF` / a generic write
 error. `open()` itself must not race `close()` or any operational
 method.
+
+`lastError()` is sticky: it keeps the most recent error string even
+after a subsequent operation succeeds. Consult it only when the
+call you care about returned `false`.
 
 For Qt apps, use the `qt_template` library on top of libcan rather than
 calling `ICanBackend` directly — it provides a worker-thread-based

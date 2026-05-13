@@ -60,6 +60,19 @@ int main() {
     CHECK(fd.data.size() == 64, "data array sized for 64-byte FD payload");
     CHECK(fd.timestamp_us == 0, "default timestamp_us zero");
 
+    std::printf("\nFrame(id, payload, len) auto-detects FD on len > 8:\n");
+    // H-4: previously a len > 8 ctor produced a classic-tagged frame
+    // whose payload would be silently truncated to 8 bytes at send() time.
+    uint8_t fd_payload[64] = {0};
+    can::Frame g_classic(0x100, fd_payload, 8);
+    CHECK(!g_classic.is_fd_frame, "len=8 stays classic");
+    can::Frame g_fd(0x100, fd_payload, 16);
+    CHECK(g_fd.is_fd_frame, "len=16 auto-tags FD");
+    CHECK(g_fd.dlc == 16, "FD payload size preserved");
+    can::Frame g_fd64(0x100, fd_payload, 64);
+    CHECK(g_fd64.is_fd_frame, "len=64 auto-tags FD");
+    CHECK(g_fd64.dlc == 64, "FD-max payload preserved");
+
     std::printf("\nFrame::length() and fdDlcCode():\n");
     can::Frame classic;
     classic.dlc = 8;
@@ -137,6 +150,12 @@ int main() {
     CHECK(can::parseBitrate("5000M") == 0, "parse 5000M (5e9 > UINT32_MAX) returns 0");
     CHECK(can::parseBitrate("-500k") == 0, "parse negative returns 0");
     CHECK(can::parseBitrate("4294967295") == 4'294'967'295u, "parse UINT32_MAX exactly");
+    // M-1: NaN/Inf inputs would previously slip past the < 0 / > kMax
+    // range check (NaN compares false either way) and trigger UB on the
+    // static_cast<uint32_t>. They must return the "invalid" sentinel.
+    CHECK(can::parseBitrate("nan") == 0, "parse NaN returns 0");
+    CHECK(can::parseBitrate("inf") == 0, "parse Inf returns 0");
+    CHECK(can::parseBitrate("-inf") == 0, "parse -Inf returns 0");
 
     std::printf("\nBitrate formatting:\n");
     CHECK(can::formatBitrate(1'000'000) == "1 Mbps", "format 1M");

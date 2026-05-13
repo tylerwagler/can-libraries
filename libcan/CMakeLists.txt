@@ -45,6 +45,15 @@ generate_export_header(libcan
 # (the build-tree alias is already `CanLibraries::can`); without this, the
 # installed name would be `CanLibraries::libcan` and CanLibrariesConfig
 # would need to manually recreate the alias post-find_package.
+# OUTPUT_NAME=can fixes the on-disk file name: the target is internally
+# called `libcan`, and without OUTPUT_NAME CMake would prefix `lib` again
+# and ship `liblibcan.so` (which downstream `-llibcan` would link, but is
+# not what anyone expects from `find_package(CanLibraries)` + the `::can`
+# alias). With this, we ship `libcan.so` and `-lcan` works.
+# SOVERSION tracks the project's major version so the SONAME accurately
+# reflects ABI breakage. A future bump to 3.x will mint a new soname and
+# old binaries will refuse to load against it (instead of silently picking
+# up an incompatible build).
 # POSITION_INDEPENDENT_CODE on the target (rather than as a global) keeps
 # the property scoped to libcan, so it works correctly even when this
 # project is consumed via add_subdirectory() from a parent that has its
@@ -54,8 +63,9 @@ set_target_properties(libcan PROPERTIES
     VISIBILITY_INLINES_HIDDEN ON
     POSITION_INDEPENDENT_CODE ON
     VERSION ${PROJECT_VERSION}
-    SOVERSION 1
+    SOVERSION ${PROJECT_VERSION_MAJOR}
     EXPORT_NAME can
+    OUTPUT_NAME can
 )
 
 # When built as a static library, the generated libcan_export.h's

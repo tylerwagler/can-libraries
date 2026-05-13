@@ -40,10 +40,18 @@ struct LIBCAN_EXPORT Frame {
 
     /// Construct a frame with a CAN id and a payload. Caller's payload
     /// is copied; len is clamped to MAX_CAN_FD_DLC (64) bytes.
+    ///
+    /// If len > 8, the frame is automatically tagged is_fd_frame=true —
+    /// otherwise the backend's send() would silently truncate the payload
+    /// to 8 bytes (the classic-CAN max) since the frame would still look
+    /// like a classic frame to the wire path. Callers that want a classic
+    /// CAN frame with an FD-sized payload (which is invalid anyway) need
+    /// to set is_fd_frame explicitly after construction.
     Frame(uint32_t can_id, const uint8_t* payload, uint8_t len)
         : id(can_id),
           dlc(len > MAX_CAN_FD_DLC ? static_cast<uint8_t>(MAX_CAN_FD_DLC) : len),
-          is_extended_id(isExtId(can_id))
+          is_extended_id(isExtId(can_id)),
+          is_fd_frame(len > MAX_CAN_DLC)
     {
         if (payload && dlc > 0) {
             std::memcpy(data.data(), payload, dlc);

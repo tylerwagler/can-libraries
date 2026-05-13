@@ -199,7 +199,9 @@ std::vector<AdapterInfo> PcanBackend::enumerateAdapters() {
 }
 
 bool PcanBackend::open(const ChannelConfig& cfg) {
-    if (channel_handle_ != 0) {
+    // open() is a lifecycle method — by contract callers serialize it
+    // against close() and the operational methods, so a plain load is fine.
+    if (channel_handle_.load(std::memory_order_acquire) != 0) {
         recordError("PCAN backend already open");
         return false;
     }
@@ -242,7 +244,6 @@ bool PcanBackend::open(const ChannelConfig& cfg) {
         }
     }
 
-    channel_handle_ = h;
     config_ = cfg;
     info_ = buildAdapterInfo(h);
 
@@ -252,35 +253,46 @@ bool PcanBackend::open(const ChannelConfig& cfg) {
     // This is the event-driven path — no polling.
     HANDLE evt = nullptr;
     if (CAN_GetValue(h, PCAN_RECEIVE_EVENT, &evt, sizeof(evt)) == PCAN_ERROR_OK) {
-        receive_handle_ = evt;
+        receive_handle_.store(evt, std::memory_order_release);
     } else {
-        receive_handle_ = nullptr;
+        receive_handle_.store(nullptr, std::memory_order_release);
     }
 #else
     // Linux: retrieve the receive event fd so callers (and select()) can
     // wait without polling.
     int fd = -1;
     if (CAN_GetValue(h, PCAN_RECEIVE_EVENT, &fd, sizeof(fd)) == PCAN_ERROR_OK) {
-        receive_fd_ = fd;
+        receive_fd_.store(fd, std::memory_order_release);
     } else {
-        receive_fd_ = -1;
+        receive_fd_.store(-1, std::memory_order_release);
     }
 #endif
+
+    // Release-store last so operational threads observing channel_handle_ != 0
+    // are guaranteed to see the config_/info_/receive_fd_/receive_handle_
+    // writes that precede it.
+    channel_handle_.store(h, std::memory_order_release);
 
     return true;
 }
 
 void PcanBackend::close() {
-    if (channel_handle_ != 0) {
-        CAN_Uninitialize(channel_handle_);
-        channel_handle_ = 0;
+    // Exchange the handle to 0 *before* tearing the SDK side down — any
+    // concurrent send/receive/status that loads the handle here-on sees 0
+    // and bails before it can hand a stale handle to CAN_Write/CAN_Read.
+    // The exchange also makes close() idempotent: a second call gets 0
+    // back and skips the syscalls.
+    uint16_t h = channel_handle_.exchange(0, std::memory_order_acq_rel);
+    receive_fd_.store(-1, std::memory_order_release);
+    receive_handle_.store(nullptr, std::memory_order_release);
+    if (h != 0) {
+        CAN_Uninitialize(h);
     }
-    receive_fd_ = -1;
-    receive_handle_ = nullptr;
 }
 
 bool PcanBackend::send(const Frame& frame) {
-    if (channel_handle_ == 0) {
+    const uint16_t h = channel_handle_.load(std::memory_order_acquire);
+    if (h == 0) {
         recordError("send() on closed PCAN backend");
         return false;
     }
@@ -293,7 +305,7 @@ bool PcanBackend::send(const Frame& frame) {
     msg.LEN = frame.dlc > 8 ? 8 : frame.dlc;
     std::memcpy(msg.DATA, frame.data.data(), msg.LEN);
 
-    TPCANStatus st = CAN_Write(channel_handle_, &msg);
+    TPCANStatus st = CAN_Write(h, &msg);
     if (st != PCAN_ERROR_OK) {
         recordPcanError("CAN_Write", st);
         return false;
@@ -302,19 +314,27 @@ bool PcanBackend::send(const Frame& frame) {
 }
 
 bool PcanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
-    if (channel_handle_ == 0) return false;
+    const uint16_t h = channel_handle_.load(std::memory_order_acquire);
+    if (h == 0) return false;
 
     // Block on the platform-native event primitive. No polling.
 #ifdef _WIN32
-    if (receive_handle_ && timeout.count() > 0) {
-        DWORD ms = timeout.count() > 0xFFFFFFFF ? INFINITE : static_cast<DWORD>(timeout.count());
-        DWORD r = WaitForSingleObject(static_cast<HANDLE>(receive_handle_), ms);
+    void* handle = receive_handle_.load(std::memory_order_acquire);
+    if (handle && timeout.count() > 0) {
+        // Clamp to UINT32_MAX-1 so very-large finite timeouts stay finite
+        // — mapping them to INFINITE turns a "wait 50 days" caller into
+        // a never-returning wait.
+        constexpr uint64_t kMaxMs = 0xFFFFFFFEULL;
+        DWORD ms = static_cast<uint64_t>(timeout.count()) > kMaxMs
+            ? static_cast<DWORD>(kMaxMs)
+            : static_cast<DWORD>(timeout.count());
+        DWORD r = WaitForSingleObject(static_cast<HANDLE>(handle), ms);
         if (r == WAIT_TIMEOUT) return false;
         if (r != WAIT_OBJECT_0) {
             recordError("WaitForSingleObject failed");
             return false;
         }
-    } else if (!receive_handle_) {
+    } else if (!handle) {
         // No event handle was retrieved at open(). The driver normally
         // provides one; falling through here means we'd have to poll,
         // which we explicitly refuse to do. Bail.
@@ -322,16 +342,31 @@ bool PcanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
         return false;
     }
 #else
-    if (receive_fd_ >= 0 && timeout.count() > 0) {
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(receive_fd_, &rfds);
-        timeval tv;
-        tv.tv_sec = timeout.count() / 1000;
-        tv.tv_usec = (timeout.count() % 1000) * 1000;
-        int sel = ::select(receive_fd_ + 1, &rfds, nullptr, nullptr, &tv);
-        if (sel <= 0) return false;
-    } else if (receive_fd_ < 0) {
+    int rfd = receive_fd_.load(std::memory_order_acquire);
+    if (rfd >= 0 && timeout.count() > 0) {
+        // EINTR-retry loop so a signal landing on this thread (Qt apps
+        // commonly install SIGCHLD handlers from QProcess) doesn't get
+        // misreported as a timeout. We track the deadline and recompute
+        // the remaining timeout each iteration so total wait remains
+        // bounded.
+        auto deadline = std::chrono::steady_clock::now() + timeout;
+        for (;;) {
+            auto remain = std::chrono::duration_cast<std::chrono::microseconds>(
+                deadline - std::chrono::steady_clock::now());
+            if (remain.count() <= 0) return false;
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(rfd, &rfds);
+            timeval tv;
+            tv.tv_sec  = remain.count() / 1'000'000;
+            tv.tv_usec = remain.count() % 1'000'000;
+            int sel = ::select(rfd + 1, &rfds, nullptr, nullptr, &tv);
+            if (sel > 0) break;
+            if (sel == 0) return false;
+            if (errno == EINTR) continue;
+            return false;
+        }
+    } else if (rfd < 0) {
         recordError("PCAN_RECEIVE_EVENT unavailable; refusing to poll");
         return false;
     }
@@ -344,7 +379,7 @@ bool PcanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
     // iteration wait on the event again.
     TPCANMsg msg;
     TPCANTimestamp ts;
-    TPCANStatus st = CAN_Read(channel_handle_, &msg, &ts);
+    TPCANStatus st = CAN_Read(h, &msg, &ts);
     if (st == PCAN_ERROR_OK) {
         // Reset before populating so stale flags / data bytes from a prior
         // call don't leak through. Matches SocketCanBackend::receive().
@@ -377,7 +412,7 @@ bool PcanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
 }
 
 int PcanBackend::receiveFd() const {
-    return receive_fd_;
+    return receive_fd_.load(std::memory_order_acquire);
 }
 
 ChannelStatus PcanBackend::status() const {
@@ -385,12 +420,13 @@ ChannelStatus PcanBackend::status() const {
     s.bus_load_percent = -1.0;
     s.rx_queue_overruns = rx_overruns_.load();
 
-    if (channel_handle_ == 0) {
+    const uint16_t h = channel_handle_.load(std::memory_order_acquire);
+    if (h == 0) {
         s.bus_state = BusState::Unknown;
         return s;
     }
 
-    TPCANStatus st = CAN_GetStatus(channel_handle_);
+    TPCANStatus st = CAN_GetStatus(h);
     if (st == PCAN_ERROR_OK) {
         s.bus_state = BusState::ErrorActive;
     } else if (st & PCAN_ERROR_BUSPASSIVE) {
@@ -408,9 +444,15 @@ ChannelStatus PcanBackend::status() const {
 }
 
 AdapterInfo PcanBackend::info() const {
-    if (channel_handle_ == 0) return info_;
-    // Refresh dynamic fields each call.
-    return buildAdapterInfo(channel_handle_);
+    // M-7: return the cached snapshot captured at open() time. Each
+    // buildAdapterInfo() call invokes 5+ CAN_GetValue syscalls, which is
+    // not what "info() is cheap" suggests in the abstract docs. The static
+    // fields (device name, firmware/driver version, serial, part number)
+    // don't change at runtime, so caching is safe; consumers that need
+    // live status should call status() instead. Pre-open() calls get the
+    // default-constructed info_, matching the contract that info() is
+    // only well-defined after open() returns.
+    return info_;
 }
 
 std::string PcanBackend::lastError() const {
