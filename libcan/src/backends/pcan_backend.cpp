@@ -26,7 +26,10 @@ namespace can {
 namespace {
 
 /// All channel handles we'll probe during enumerateAdapters().
-/// Covers USB (1..16), PCI (1..16), LAN (1..16).
+/// Covers USB (1..16), PCI (1..8), LAN (1..8). PCANBasic does define
+/// PCAN_PCIBUS9..16 and PCAN_LANBUS9..16 in current SDKs; extend the
+/// list here if you have a chassis that lights more than eight of
+/// either interface up.
 constexpr TPCANHandle kProbeHandles[] = {
     PCAN_USBBUS1,  PCAN_USBBUS2,  PCAN_USBBUS3,  PCAN_USBBUS4,
     PCAN_USBBUS5,  PCAN_USBBUS6,  PCAN_USBBUS7,  PCAN_USBBUS8,

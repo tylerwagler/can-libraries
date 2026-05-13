@@ -146,6 +146,23 @@ int main() {
         }
     }
 
+    std::printf("\nreceive(timeout=0) is a non-blocking poll:\n");
+    {
+        // Regression guard for the pre-2.0.0 bug where receive(0ms) skipped
+        // select() and went into a blocking read() — hanging callers on an
+        // idle bus. After the fix, receive(0ms) on an empty queue must
+        // return false essentially immediately. Anything under 50ms here
+        // dwarfs the previous indefinite hang.
+        auto t0 = std::chrono::steady_clock::now();
+        can::Frame f;
+        const bool got = backend->receive(f, std::chrono::milliseconds(0));
+        auto t1 = std::chrono::steady_clock::now();
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0);
+        CHECK(!got, "no frame available on idle bus");
+        CHECK(elapsed < std::chrono::milliseconds(50),
+              "receive(0ms) returns inside 50ms (was: indefinite hang)");
+    }
+
     std::printf("\nTX-echo deque doesn't false-positive on later distinct frames:\n");
     {
         // Send one frame, drain its echo, then send a frame with a totally

@@ -201,9 +201,18 @@ std::vector<AdapterInfo> SocketCanBackend::enumerateAdapters() {
     DIR* d = opendir("/sys/class/net");
     if (!d) return adapters;
 
+    // Match common CAN interface naming conventions: kernel native (can*),
+    // virtual CAN (vcan*), and serial-line CAN (slcan*). Anything more
+    // exotic the user can still pass directly to open() — this filter
+    // only governs *enumeration*.
+    auto starts_with = [](const std::string& s, const char* prefix) {
+        return s.rfind(prefix, 0) == 0;
+    };
     while (auto* entry = readdir(d)) {
-        std::string name = entry->d_name;
-        if (name.rfind("can", 0) != 0 && name.rfind("vcan", 0) != 0) continue;
+        const std::string name = entry->d_name;
+        if (!starts_with(name, "can") &&
+            !starts_with(name, "vcan") &&
+            !starts_with(name, "slcan")) continue;
         adapters.push_back(buildSocketCanInfo(name));
     }
     closedir(d);
@@ -640,10 +649,14 @@ ChannelStatus SocketCanBackend::status() const {
 }
 
 AdapterInfo SocketCanBackend::info() const {
-    if (socket_fd_.load(std::memory_order_acquire) < 0) return info_;
-    // Refresh dynamic fields each call so callers see live driver/firmware
-    // strings even if they queried before open().
-    return buildSocketCanInfo(config_.channel_id);
+    // info_ is populated in open() from buildSocketCanInfo() (which
+    // reads sysfs + runs SIOCETHTOOL). Returning the cached copy avoids
+    // a syscall storm on apps that poll info() alongside status(); the
+    // firmware/driver strings don't change at runtime. Pre-open() calls
+    // get the default-constructed info_ (mostly empty), which matches
+    // the documented contract that info() is only well-defined after
+    // open() returns.
+    return info_;
 }
 
 std::string SocketCanBackend::lastError() const {
