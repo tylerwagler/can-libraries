@@ -317,9 +317,6 @@ bool KvaserBackend::send(const Frame& frame) {
 }
 
 bool KvaserBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
-    const int h = handle_.load(std::memory_order_acquire);
-    if (h < 0) return false;
-
     long id = 0;
     // Sized for CAN-FD even though we don't yet open channels in FD mode:
     // if a future canlib or a channel opened by another process delivers an
@@ -330,12 +327,27 @@ bool KvaserBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
     unsigned int flags = 0;
     unsigned long ts_ms = 0;
 
-    // canReadWait blocks the caller in the kernel until a frame arrives
-    // or the timeout expires — event-driven, not polling.
-    canStatus st = canReadWait(h, &id, data, &dlc, &flags, &ts_ms,
-                               static_cast<unsigned long>(timeout.count()));
-    if (st == canERR_NOMSG) return false;
-    if (st != canOK) {
+    // Slice canReadWait into bounded steps and re-check the atomic handle
+    // between each. canReadWait itself isn't wakeable by an external
+    // signal, so this is what gives close() a prompt return path on
+    // Kvaser: a worker mid-wait sees handle_ flipped to -1 within one
+    // step and exits, rather than waiting out the caller's full timeout.
+    // 50ms balances responsiveness against syscall overhead.
+    constexpr unsigned long kStepMs = 50;
+    canStatus st;
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    for (;;) {
+        const int h = handle_.load(std::memory_order_acquire);
+        if (h < 0) return false;  // close() raced us
+        const auto remain_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count();
+        if (remain_ms <= 0) return false;
+        const unsigned long step = (static_cast<unsigned long>(remain_ms) < kStepMs)
+            ? static_cast<unsigned long>(remain_ms)
+            : kStepMs;
+        st = canReadWait(h, &id, data, &dlc, &flags, &ts_ms, step);
+        if (st == canOK) break;
+        if (st == canERR_NOMSG) continue;  // step expired, re-check handle and loop
         if (st == canERR_HARDWARE) rx_overruns_.fetch_add(1);
         recordCanError("canReadWait", st);
         return false;

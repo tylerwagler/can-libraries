@@ -132,24 +132,22 @@ struct ChannelConfig {
 ///       with each other and with send/receive.
 ///
 ///   close() *may* be called while another thread is blocked in
-///   receive(). The supported teardown pattern is:
+///   receive(). All backends unblock the receive() promptly:
+///     - SocketCanBackend and PcanBackend signal a sideband eventfd
+///       (Linux) / Win32 event (Windows) that's multiplexed into the
+///       blocked wait, so the worker returns within a scheduler
+///       quantum (typically sub-millisecond).
+///     - KvaserBackend slices canReadWait into 50ms steps and re-
+///       checks the atomic handle between each, so close()-to-return
+///       is bounded at ~50ms. (canReadWait itself isn't wakeable by
+///       an external signal.)
+///
+///   The supported teardown pattern is:
 ///     1. main thread calls close() — from this point on send()/
 ///        receive() return immediately with a failure
 ///     2. main thread joins the worker thread(s) (which return from
 ///        their last receive() and exit their loops)
 ///     3. destructor or next open() runs
-///
-///   How quickly close() unblocks an in-flight receive() is BACKEND-
-///   SPECIFIC:
-///     - SocketCanBackend: prompt. Uses a sideband eventfd in select()
-///       so close() wakes a blocked worker within a scheduler quantum.
-///     - PcanBackend / KvaserBackend: NOT prompt. close() invalidates
-///       the SDK handle, but a worker already inside WaitForSingleObject
-///       / canReadWait waits out its full timeout before returning.
-///       Workers on these backends should be invoked with a short
-///       receive() timeout (e.g. 100ms) so close() + join() returns
-///       inside that bound. (Prompt-wakeup support is tracked but not
-///       yet wired through these vendor SDKs.)
 ///
 ///   send() racing close() is best-effort: it may succeed if the
 ///   syscall completes before close() reclaims the fd, or fail with

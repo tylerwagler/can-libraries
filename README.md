@@ -175,8 +175,9 @@ Once `open()` has returned successfully:
 - `receive()` must be called from a single thread at a time.
 - `status()`, `info()`, `lastError()` are safe to call alongside the above.
 
-`close()` is supported while another thread is blocked in `receive()`.
-Supported teardown:
+`close()` is supported while another thread is blocked in `receive()`,
+and all three backends unblock the receive promptly. Supported
+teardown:
 
 1. main thread calls `close()` — from this point on `send`/`receive`
    return immediately with a failure.
@@ -184,19 +185,18 @@ Supported teardown:
    loops cleanly.
 3. destructor or next `open()` runs.
 
-How quickly `close()` unblocks a blocked `receive()` is **backend-
-specific**:
+How quickly `close()` unblocks a blocked `receive()`:
 
-- **`SocketCanBackend`** — prompt (within a scheduler quantum).
-  `close()` signals a sideband eventfd that wakes the `select()`
-  immediately. The receive returns `false` instead of waiting out
-  its timeout.
-- **`PcanBackend` / `KvaserBackend`** — **not** prompt. `close()`
-  invalidates the SDK handle, but a worker already inside
-  `WaitForSingleObject` / `canReadWait` waits out its full timeout
-  before returning. Workers on these backends should be invoked
-  with a short `receive()` timeout (e.g. 100 ms) so the
-  `close() + join()` returns inside that bound.
+- **`SocketCanBackend`** and **`PcanBackend`** — sub-millisecond.
+  `close()` signals a sideband eventfd (Linux) / Win32 event
+  (Windows) that's multiplexed into the blocked `select()` /
+  `WaitForMultipleObjects` alongside the receive event, so the
+  worker returns within a scheduler quantum.
+- **`KvaserBackend`** — bounded at ~50 ms. `canReadWait` isn't
+  wakeable by an external signal, so the backend slices it into
+  50 ms steps and re-checks the atomic handle between each. A
+  worker mid-wait exits within one step after `close()` flips the
+  handle.
 
 `send()` racing `close()` is best-effort: it may complete before
 `close()` reclaims the fd, or fail with `EBADF` / a generic write

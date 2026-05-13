@@ -17,6 +17,8 @@
 #ifdef _WIN32
 #  include <windows.h>
 #else
+#  include <cerrno>
+#  include <sys/eventfd.h>
 #  include <sys/select.h>
 #  include <unistd.h>
 #endif
@@ -249,7 +251,7 @@ bool PcanBackend::open(const ChannelConfig& cfg) {
 
 #ifdef _WIN32
     // Windows: retrieve the auto-reset Win32 event HANDLE that PCANBasic
-    // signals when frames arrive, then wait on it with WaitForSingleObject.
+    // signals when frames arrive, then wait on it with WaitForMultipleObjects.
     // This is the event-driven path — no polling.
     HANDLE evt = nullptr;
     if (CAN_GetValue(h, PCAN_RECEIVE_EVENT, &evt, sizeof(evt)) == PCAN_ERROR_OK) {
@@ -257,6 +259,18 @@ bool PcanBackend::open(const ChannelConfig& cfg) {
     } else {
         receive_handle_.store(nullptr, std::memory_order_release);
     }
+
+    // Sideband event so close() can wake a blocked WaitForMultipleObjects
+    // promptly instead of forcing the worker to wait out its receive()
+    // timeout. Manual-reset auto-cleared by close(); see header.
+    HANDLE shutdown_evt = CreateEventA(nullptr, /*manualReset=*/TRUE,
+                                       /*initialState=*/FALSE, nullptr);
+    if (shutdown_evt == nullptr) {
+        recordError("CreateEvent(shutdown) failed");
+        CAN_Uninitialize(h);
+        return false;
+    }
+    shutdown_event_handle_.store(shutdown_evt, std::memory_order_release);
 #else
     // Linux: retrieve the receive event fd so callers (and select()) can
     // wait without polling.
@@ -266,28 +280,60 @@ bool PcanBackend::open(const ChannelConfig& cfg) {
     } else {
         receive_fd_.store(-1, std::memory_order_release);
     }
+
+    // Sideband eventfd so close() can wake a blocked select() promptly.
+    int sevfd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (sevfd < 0) {
+        recordError(std::string("eventfd(shutdown) failed: ") + std::strerror(errno));
+        CAN_Uninitialize(h);
+        return false;
+    }
+    shutdown_eventfd_.store(sevfd, std::memory_order_release);
 #endif
 
     // Release-store last so operational threads observing channel_handle_ != 0
-    // are guaranteed to see the config_/info_/receive_fd_/receive_handle_
-    // writes that precede it.
+    // are guaranteed to see the config_/info_/receive_fd_/receive_handle_/
+    // shutdown_* writes that precede it.
     channel_handle_.store(h, std::memory_order_release);
 
     return true;
 }
 
 void PcanBackend::close() {
-    // Exchange the handle to 0 *before* tearing the SDK side down — any
-    // concurrent send/receive/status that loads the handle here-on sees 0
-    // and bails before it can hand a stale handle to CAN_Write/CAN_Read.
-    // The exchange also makes close() idempotent: a second call gets 0
-    // back and skips the syscalls.
+    // Ordering matches SocketCanBackend so a blocked receive() returns
+    // promptly:
+    //   1. Invalidate shutdown_* first — any worker that hasn't yet
+    //      loaded it sees the sentinel and bails before touching the
+    //      SDK handles.
+    //   2. Signal the *snapshotted* shutdown primitive — wakes any
+    //      worker already inside select() / WaitForMultipleObjects.
+    //   3. Exchange channel_handle_ to 0 so racing new entrants get the
+    //      closed-state fast-path.
+    //   4. Tear down the SDK side.
+    //   5. Release the shutdown primitive itself.
+#ifdef _WIN32
+    HANDLE shutdown_evt = static_cast<HANDLE>(
+        shutdown_event_handle_.exchange(nullptr, std::memory_order_acq_rel));
+    if (shutdown_evt) SetEvent(shutdown_evt);
+#else
+    int shutdown_fd = shutdown_eventfd_.exchange(-1, std::memory_order_acq_rel);
+    if (shutdown_fd >= 0) {
+        const uint64_t one = 1;
+        ssize_t w = ::write(shutdown_fd, &one, sizeof(one));
+        (void)w;
+    }
+#endif
     uint16_t h = channel_handle_.exchange(0, std::memory_order_acq_rel);
     receive_fd_.store(-1, std::memory_order_release);
     receive_handle_.store(nullptr, std::memory_order_release);
     if (h != 0) {
         CAN_Uninitialize(h);
     }
+#ifdef _WIN32
+    if (shutdown_evt) CloseHandle(shutdown_evt);
+#else
+    if (shutdown_fd >= 0) ::close(shutdown_fd);
+#endif
 }
 
 bool PcanBackend::send(const Frame& frame) {
@@ -317,10 +363,20 @@ bool PcanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
     const uint16_t h = channel_handle_.load(std::memory_order_acquire);
     if (h == 0) return false;
 
-    // Block on the platform-native event primitive. No polling.
+    // Block on the platform-native event primitive multiplexed with our
+    // shutdown sideband, so close() returns promptly without forcing the
+    // worker to wait out its receive() timeout. No polling.
 #ifdef _WIN32
-    void* handle = receive_handle_.load(std::memory_order_acquire);
+    HANDLE handle = static_cast<HANDLE>(receive_handle_.load(std::memory_order_acquire));
+    HANDLE shutdown_evt = static_cast<HANDLE>(
+        shutdown_event_handle_.load(std::memory_order_acquire));
     if (handle && timeout.count() > 0) {
+        HANDLE handles[2];
+        DWORD num_handles = 1;
+        handles[0] = handle;
+        if (shutdown_evt) {
+            handles[num_handles++] = shutdown_evt;
+        }
         // Clamp to UINT32_MAX-1 so very-large finite timeouts stay finite
         // — mapping them to INFINITE turns a "wait 50 days" caller into
         // a never-returning wait.
@@ -328,10 +384,11 @@ bool PcanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
         DWORD ms = static_cast<uint64_t>(timeout.count()) > kMaxMs
             ? static_cast<DWORD>(kMaxMs)
             : static_cast<DWORD>(timeout.count());
-        DWORD r = WaitForSingleObject(static_cast<HANDLE>(handle), ms);
+        DWORD r = WaitForMultipleObjects(num_handles, handles, FALSE, ms);
         if (r == WAIT_TIMEOUT) return false;
+        if (r == WAIT_OBJECT_0 + 1) return false;  // close() signalled
         if (r != WAIT_OBJECT_0) {
-            recordError("WaitForSingleObject failed");
+            recordError("WaitForMultipleObjects failed");
             return false;
         }
     } else if (!handle) {
@@ -342,7 +399,8 @@ bool PcanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
         return false;
     }
 #else
-    int rfd = receive_fd_.load(std::memory_order_acquire);
+    int rfd  = receive_fd_.load(std::memory_order_acquire);
+    int sfd  = shutdown_eventfd_.load(std::memory_order_acquire);
     if (rfd >= 0 && timeout.count() > 0) {
         // EINTR-retry loop so a signal landing on this thread (Qt apps
         // commonly install SIGCHLD handlers from QProcess) doesn't get
@@ -357,11 +415,16 @@ bool PcanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
             fd_set rfds;
             FD_ZERO(&rfds);
             FD_SET(rfd, &rfds);
+            if (sfd >= 0) FD_SET(sfd, &rfds);
+            const int nfds = (sfd > rfd ? sfd : rfd) + 1;
             timeval tv;
             tv.tv_sec  = remain.count() / 1'000'000;
             tv.tv_usec = remain.count() % 1'000'000;
-            int sel = ::select(rfd + 1, &rfds, nullptr, nullptr, &tv);
-            if (sel > 0) break;
+            int sel = ::select(nfds, &rfds, nullptr, nullptr, &tv);
+            if (sel > 0) {
+                if (sfd >= 0 && FD_ISSET(sfd, &rfds)) return false;  // close() signalled
+                break;
+            }
             if (sel == 0) return false;
             if (errno == EINTR) continue;
             return false;

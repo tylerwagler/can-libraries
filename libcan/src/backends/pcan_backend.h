@@ -60,7 +60,17 @@ private:
     /// header doesn't need PCANBasic.h.
     std::atomic<uint16_t> channel_handle_{0};
     std::atomic<int>      receive_fd_{-1};      ///< Linux only; -1 on Windows or if not retrieved
-    std::atomic<void*>    receive_handle_{nullptr}; ///< Windows only; HANDLE for WaitForSingleObject
+    std::atomic<void*>    receive_handle_{nullptr}; ///< Windows only; HANDLE for WaitForMultipleObjects
+
+    /// Sideband wakeup channel selected on by receive() alongside the
+    /// PCAN receive event. close() signals it so a blocked worker
+    /// returns promptly instead of waiting out its full timeout, matching
+    /// SocketCanBackend's behavior. On Linux it's an eventfd; on Windows
+    /// it's a manual-reset(*) Win32 event handle. (*) auto-reset would
+    /// work too but manual-reset means re-entry in close() observes the
+    /// signaled state — extra defensive against tear-down races.
+    std::atomic<int>   shutdown_eventfd_{-1};      ///< Linux only
+    std::atomic<void*> shutdown_event_handle_{nullptr}; ///< Windows only
 
     ChannelConfig config_;
     AdapterInfo info_;
