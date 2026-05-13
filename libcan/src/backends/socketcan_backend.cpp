@@ -399,11 +399,21 @@ bool SocketCanBackend::send(const Frame& frame) {
             recordError("send: CAN-FD frame requested but socket is not FD-enabled");
             return false;
         }
+        // FD lengths are encoded into a 4-bit DLC code on the wire; only
+        // 0..8, 12, 16, 20, 24, 32, 48, 64 are representable. Reject
+        // anything else rather than silently truncating to the next
+        // valid length — a caller that sets dlc=10 thinking it'll send
+        // 10 bytes deserves to know it won't.
+        if (!isValidFdLength(frame.dlc)) {
+            recordError("send: invalid CAN-FD payload length " + std::to_string(frame.dlc)
+                        + " (valid: 0..8, 12, 16, 20, 24, 32, 48, 64)");
+            return false;
+        }
         canfd_frame raw{};
         raw.can_id = frame.id;
         if (frame.is_extended_id) raw.can_id |= CAN_EFF_FLAG;
         // RTR is not valid for CAN-FD; ignore the flag if set.
-        raw.len = frame.dlc > MAX_CAN_FD_DLC ? static_cast<uint8_t>(MAX_CAN_FD_DLC) : frame.dlc;
+        raw.len = frame.dlc;
         raw.flags = 0;
         if (frame.is_brs) raw.flags |= CANFD_BRS;
         if (frame.is_esi) raw.flags |= CANFD_ESI;
@@ -415,11 +425,19 @@ bool SocketCanBackend::send(const Frame& frame) {
             return false;
         }
     } else {
+        // Classic CAN tops out at 8 bytes. Reject rather than silently
+        // truncate so callers don't ship 8 bytes when they meant 16 and
+        // forgot to set is_fd_frame.
+        if (frame.dlc > MAX_CAN_DLC) {
+            recordError("send: classic CAN dlc=" + std::to_string(frame.dlc)
+                        + " exceeds 8 bytes (use is_fd_frame=true for CAN-FD)");
+            return false;
+        }
         can_frame raw{};
         raw.can_id = frame.id;
         if (frame.is_extended_id) raw.can_id |= CAN_EFF_FLAG;
         if (frame.is_remote_frame) raw.can_id |= CAN_RTR_FLAG;
-        raw.can_dlc = frame.dlc > 8 ? 8 : frame.dlc;
+        raw.can_dlc = frame.dlc;
         std::memcpy(raw.data, frame.data.data(), raw.can_dlc);
 
         n = ::write(fd, &raw, sizeof(raw));
@@ -499,17 +517,34 @@ bool SocketCanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) 
     // semantics callers expect. The previous optimization that skipped select() when
     // timeout==0 turned the read() below into a *blocking* call (default socket mode), which
     // hangs a polling caller indefinitely on an idle bus and breaks clean thread shutdown.
-    fd_set rfds;
-    FD_ZERO(&rfds);
-    FD_SET(fd, &rfds);
-    if (evfd >= 0) FD_SET(evfd, &rfds);
-
-    timeval tv;
-    tv.tv_sec = timeout.count() / 1000;
-    tv.tv_usec = (timeout.count() % 1000) * 1000;
-
+    //
+    // EINTR-retry: a signal landing on the receive thread (Qt apps install
+    // SIGCHLD handlers via QProcess and friends) would otherwise turn into
+    // a premature `false` return. We track the absolute deadline and
+    // recompute the remaining timeout each iteration so the total wait
+    // stays bounded by the caller's timeout.
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
     const int nfds = (evfd > fd ? evfd : fd) + 1;
-    int sel = ::select(nfds, &rfds, nullptr, nullptr, &tv);
+    fd_set rfds;
+    int sel;
+    for (;;) {
+        auto remain = std::chrono::duration_cast<std::chrono::microseconds>(
+            deadline - std::chrono::steady_clock::now());
+        if (remain.count() < 0) remain = std::chrono::microseconds{0};
+
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        if (evfd >= 0) FD_SET(evfd, &rfds);
+
+        timeval tv;
+        tv.tv_sec  = remain.count() / 1'000'000;
+        tv.tv_usec = remain.count() % 1'000'000;
+
+        sel = ::select(nfds, &rfds, nullptr, nullptr, &tv);
+        if (sel >= 0) break;
+        if (errno == EINTR) continue;
+        break;
+    }
     if (sel <= 0) return false; // timeout (incl. 0ms with nothing pending) or error
 
     // close() signalled us — exit promptly without touching the CAN

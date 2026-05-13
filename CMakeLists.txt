@@ -127,6 +127,14 @@ if(CANLIB_USE_VECTOR_DBC)
     endif()
     add_subdirectory(third_party/Vector_DBC EXCLUDE_FROM_ALL)
     _canlib_fix_toby_includes(Vector_DBC Vector_DBC)
+    # The Vector_DBC flex/bison-generated Scanner.cpp triggers a
+    # -Wimplicit-fallthrough on modern GCC. The SYSTEM include in
+    # _canlib_fix_toby_includes suppresses warnings on consumers of the
+    # *headers*, but not on Vector_DBC's own compilation, so silence it
+    # at the source.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(Vector_DBC PRIVATE -Wno-implicit-fallthrough)
+    endif()
     # Re-export with our namespace prefix so consumers refer to a stable
     # alias instead of the upstream's bare target name.
     add_library(CanLibraries::dbc ALIAS Vector_DBC)
@@ -193,11 +201,16 @@ if(CANLIB_INSTALL)
         COMPATIBILITY SameMajorVersion
     )
 
-    # Install CMake config files
+    # Install CMake config files. The Find* modules ship alongside so
+    # that a static-libcan consumer's find_dependency(PCANBasic|Kvaser)
+    # call (made from CanLibrariesConfig.cmake when the corresponding
+    # backend was compiled in) can resolve.
     install(
         FILES
             ${CMAKE_CURRENT_BINARY_DIR}/CanLibrariesConfig.cmake
             ${CMAKE_CURRENT_BINARY_DIR}/CanLibrariesConfigVersion.cmake
+            ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindPCANBasic.cmake
+            ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindKvaser.cmake
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/CanLibraries
     )
 

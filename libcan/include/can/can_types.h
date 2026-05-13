@@ -9,6 +9,7 @@
 #ifndef CAN_TYPES_H
 #define CAN_TYPES_H
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -95,6 +96,13 @@ inline uint32_t parseBitrate(const std::string& bitrate) {
     while (*end == ' ') ++end;
     if (*end == 'k' || *end == 'K') v *= 1000.0;
     else if (*end == 'M' || *end == 'm') v *= 1'000'000.0;
+    // Reject NaN/Inf before the range check: NaN comparisons return
+    // false in both directions so an unchecked NaN would slip past the
+    // bounds test and then trigger UB on the static_cast<uint32_t>
+    // (a value not representable in the destination type is UB per
+    // C++23 [conv.fpint]/1). std::strtod returns NaN for inputs like
+    // "nan" and Inf for "inf"; treat both as unparseable.
+    if (!std::isfinite(v)) return 0;
     // Clamp before cast: casting an out-of-range double to uint32_t is
     // undefined behavior pre-C++20 (implementation-defined since) and
     // can wrap, saturate, or produce garbage depending on the compiler.

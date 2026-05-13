@@ -4,6 +4,30 @@ include(CMakeFindDependencyMacro)
 
 find_dependency(Threads)
 
+# Re-discover vendor SDKs for any backend that was compiled into the
+# installed libcan. For a shared-library build these are PRIVATE link
+# deps and dont't propagate through the installed target, so the
+# find_dependency calls are no-ops. For a static build (libcan.a) the
+# vendor libraries are exposed as INTERFACE_LINK_LIBRARIES of the
+# installed target, and downstream link will fail unless we locate them
+# here. The CanLibraries-side @VAR@ values are stamped in at install
+# time from the build's CMake cache.
+set(_canlib_backend_pcan   "@CAN_BACKEND_PCAN@")
+set(_canlib_backend_kvaser "@CAN_BACKEND_KVASER@")
+set(_canlib_shared         "@BUILD_SHARED_LIBS@")
+if(NOT _canlib_shared)
+    list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+    if(_canlib_backend_pcan)
+        find_dependency(PCANBasic)
+    endif()
+    if(_canlib_backend_kvaser)
+        find_dependency(Kvaser)
+    endif()
+endif()
+unset(_canlib_backend_pcan)
+unset(_canlib_backend_kvaser)
+unset(_canlib_shared)
+
 include("${CMAKE_CURRENT_LIST_DIR}/CanLibrariesTargets.cmake")
 
 check_required_components(CanLibraries)
@@ -13,3 +37,5 @@ check_required_components(CanLibraries)
 # Vector_ASC are vendored via git submodules and are *not* installed as
 # part of CanLibraries; consumers of an installed CanLibraries need to
 # locate those independently if they require DBC/BLF/ASC parsing.
+# In-tree (add_subdirectory) consumers get `CanLibraries::dbc`,
+# `CanLibraries::blf`, and `CanLibraries::asc` aliases automatically.
