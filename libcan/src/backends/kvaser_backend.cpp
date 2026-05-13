@@ -86,7 +86,13 @@ BackendCapabilities KvaserBackend::capabilities() const {
     caps.supports_can_fd = false;
     caps.supports_listen_only = true;
     caps.supports_loopback = true;
-    caps.supports_receive_own = true;
+    // Receive-own is not wired: enabling it on Kvaser needs canIoCtl with
+    // the local-TX-echo ioctl AND a canMSG_TXACK check in receive() to
+    // set frame.is_tx. The prior code mapped receive_own_messages to
+    // canOPEN_ACCEPT_VIRTUAL, which is the flag for accessing *virtual*
+    // channels and has nothing to do with TX echo. Advertise false until
+    // the real path lands.
+    caps.supports_receive_own = false;
     caps.supports_acceptance_filters = true;
     caps.exposes_error_counters = true;
     caps.exposes_bus_load = false;       // computed at higher layer
@@ -196,6 +202,18 @@ bool KvaserBackend::open(const ChannelConfig& cfg) {
         return false;
     }
 
+    if (cfg.receive_own_messages) {
+        // Honest failure: the prior code OR'd in canOPEN_ACCEPT_VIRTUAL
+        // here, which is the flag for opening virtual Kvaser channels —
+        // not for echoing transmitted frames back to us. Wiring this
+        // properly needs canIoCtl(handle, canIOCTL_SET_LOCAL_TXECHO/
+        // TXACK, &on) and a canMSG_TXACK check in receive() to set
+        // frame.is_tx. Refusing here is preferable to silently dropping
+        // the flag on the floor.
+        recordError("receive_own_messages not yet implemented for Kvaser backend");
+        return false;
+    }
+
     long bitrate;
     if (!mapBitrate(cfg.bitrate, bitrate)) {
         recordError("Unsupported bitrate for Kvaser preset: " + std::to_string(cfg.bitrate));
@@ -203,7 +221,6 @@ bool KvaserBackend::open(const ChannelConfig& cfg) {
     }
 
     int flags = canOPEN_EXCLUSIVE | canOPEN_REQUIRE_INIT_ACCESS;
-    if (cfg.receive_own_messages) flags |= canOPEN_ACCEPT_VIRTUAL;
 
     int h = canOpenChannel(channel, flags);
     if (h < 0) {
