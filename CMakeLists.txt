@@ -189,6 +189,24 @@ if(CANLIB_USE_VECTOR_ASC)
     add_library(CanLibraries::asc ALIAS Vector_ASC)
 endif()
 
+# Suppress Qt's AUTOMOC/AUTOUIC/AUTORCC on the Vector submodule targets.
+# A Qt consumer that does `set(CMAKE_AUTOMOC ON)` before
+# `add_subdirectory(can-libraries)` would otherwise have AUTOMOC sweep
+# the Vector_DBC / Vector_ASC flex/bison-generated parser sources and
+# emit a CMP0071 warning ("excluding GENERATED source files..."). These
+# submodules are pure C++ parsers, not Qt code, so opting out is the
+# right answer — no Q_OBJECT, no .ui, no .qrc to find.
+foreach(_canlib_toby IN ITEMS Vector_DBC Vector_BLF Vector_ASC)
+    if(TARGET ${_canlib_toby})
+        set_target_properties(${_canlib_toby} PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+        )
+    endif()
+endforeach()
+unset(_canlib_toby)
+
 # Attach the Vector submodules to our export set so consumers of an
 # installed CanLibraries can use CanLibraries::dbc / ::blf / ::asc
 # straight from find_package(CanLibraries).
