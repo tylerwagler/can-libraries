@@ -163,17 +163,8 @@ if(CANLIB_USE_VECTOR_BLF)
     endif()
     add_subdirectory(third_party/Vector_BLF ${_canlib_subdir_extras})
     _canlib_fix_toby_includes(Vector_BLF Vector_BLF)
-    # Vector_BLF v2.4.2 sources use <cstdint> typedefs (uint8_t, etc.)
-    # without explicitly including the header. Modern libstdc++ no
-    # longer pulls <cstdint> in transitively, so the build fails.
-    # Force-include it on every TU as a workaround until upstream
-    # ships the fix. -include is a GCC/Clang flag.
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(Vector_BLF PRIVATE -include cstdint)
-        target_compile_options(Vector_BLF PUBLIC  -include cstdint)
-    endif()
     set_target_properties(Vector_BLF PROPERTIES
-        CXX_STANDARD 17
+        CXX_STANDARD 23
         EXPORT_NAME blf
     )
     add_library(CanLibraries::blf ALIAS Vector_BLF)
