@@ -1,12 +1,12 @@
 [submodule "third_party/Vector_DBC"]
 	path = third_party/Vector_DBC
-	url = https://github.com/tylerwagler/vector_dbc.git
+	url = https://git.elytrondefense.ai/elytron/can/vector_dbc.git
 	branch = master
 [submodule "third_party/Vector_BLF"]
 	path = third_party/Vector_BLF
-	url = https://github.com/tylerwagler/vector_blf.git
+	url = https://git.elytrondefense.ai/elytron/can/vector_blf.git
 	branch = master
 [submodule "third_party/Vector_ASC"]
 	path = third_party/Vector_ASC
-	url = https://github.com/tylerwagler/vector_asc.git
+	url = https://git.elytrondefense.ai/elytron/can/vector_asc.git
 	branch = master
