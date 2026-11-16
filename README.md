@@ -17,9 +17,15 @@ Components:
     in-kernel drivers (`peak_usb`, `kvaser_usb`, ...) that present
     standard `canN` netdev interfaces — `SocketCanBackend` handles
     all of them uniformly without any vendor SDK installed.
-  - `PcanBackend` (Windows) — PEAK-System PCANBasic API. Also compiles
-    on Linux for cross-platform development, but the Linux build is
-    not the recommended deployment path: use `SocketCanBackend` against
+  - `PcanBackend` (Windows / macOS) — PEAK-System PCANBasic API. On
+    macOS PEAK ships no driver at all, so this path links UV Software's
+    PCBUSB library instead (freeware, www.mac-can.com): a user-space
+    PCAN-USB driver with a PCANBasic-compatible API whose
+    `PCAN_RECEIVE_EVENT` yields a select()-able fd, identical to
+    `libpcanbasic` on Linux. `FindPCANBasic.cmake` locates it under
+    `/usr/local` or `PCANBASIC_ROOT`. Also compiles on Linux for
+    cross-platform development, but the Linux build is not the
+    recommended deployment path: use `SocketCanBackend` against
     the kernel's `peak_usb` driver instead.
   - `KvaserBackend` (Windows) — Kvaser canlib. Same shape: also builds
     on Linux for parity but Linux deployments should go through

@@ -59,18 +59,22 @@ private:
     /// SDK with a stale handle. Stored as plain integer so the public
     /// header doesn't need PCANBasic.h.
     std::atomic<uint16_t> channel_handle_{0};
-    std::atomic<int>      receive_fd_{-1};      ///< Linux only; -1 on Windows or if not retrieved
+    std::atomic<int>      receive_fd_{-1};      ///< Linux/macOS (fd); -1 on Windows or if not retrieved
     std::atomic<void*>    receive_handle_{nullptr}; ///< Windows only; HANDLE for WaitForMultipleObjects
 
     /// Sideband wakeup channel selected on by receive() alongside the
     /// PCAN receive event. close() signals it so a blocked worker
     /// returns promptly instead of waiting out its full timeout, matching
-    /// SocketCanBackend's behavior. On Linux it's an eventfd; on Windows
-    /// it's a manual-reset(*) Win32 event handle. (*) auto-reset would
-    /// work too but manual-reset means re-entry in close() observes the
-    /// signaled state — extra defensive against tear-down races.
-    std::atomic<int>   shutdown_eventfd_{-1};      ///< Linux only
+    /// SocketCanBackend's behavior. On Windows it's a manual-reset(*)
+    /// Win32 event handle. (*) auto-reset would work too but manual-reset
+    /// means re-entry in close() observes the signaled state — extra
+    /// defensive against tear-down races.
+    /// On POSIX the channel is a (read fd, write fd) pair: on Linux both
+    /// names refer to one eventfd; on macOS, which has no eventfd, they
+    /// are the two ends of a non-blocking AF_UNIX socketpair.
     std::atomic<void*> shutdown_event_handle_{nullptr}; ///< Windows only
+    std::atomic<int>   shutdown_read_fd_{-1};  ///< POSIX: end selected on by receive()
+    std::atomic<int>   shutdown_write_fd_{-1}; ///< POSIX: end written to by close()
 
     ChannelConfig config_;
     AdapterInfo info_;

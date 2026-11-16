@@ -8,7 +8,17 @@
 
 #include "pcan_backend.h"
 
-#include <PCANBasic.h>
+// On macOS the PCAN-Basic-compatible API is UV Software's PCBUSB library
+// ("macOS Library for PCAN-USB Interfaces", www.mac-can.com): a freeware
+// user-space PCAN-USB driver whose header is synchronized with PEAK's
+// PCANBasic.h and whose PCAN_RECEIVE_EVENT yields a select()-able fd,
+// exactly like libpcanbasic on Linux. Function names and types are
+// identical; only the header name differs.
+#if defined(__APPLE__)
+#  include <PCBUSB.h>
+#else
+#  include <PCANBasic.h>
+#endif
 
 #include <chrono>
 #include <cstring>
@@ -18,29 +28,51 @@
 #  include <windows.h>
 #else
 #  include <cerrno>
-#  include <sys/eventfd.h>
 #  include <sys/select.h>
 #  include <unistd.h>
+#  ifdef __linux__
+#    include <sys/eventfd.h>
+#  else
+#    include <fcntl.h>
+#    include <sys/socket.h>
+#  endif
 #endif
 
 namespace can {
 
 namespace {
 
+/// Upper bound of the contiguous USB handle range the SDK exposes.
+/// PEAK's PCANBasic goes to PCAN_USBBUS16; UV Software's PCBUSB (macOS)
+/// supports at most 8 PCAN-USB/PCAN-USB FD devices and hides
+/// PCAN_USBBUS9..16 behind `#ifndef __APPLE__` in its own header.
+/// Handles 1..8 are contiguous (0x51..0x58) in both.
+#if defined(__APPLE__)
+constexpr TPCANHandle kLastUsbHandle = PCAN_USBBUS8;
+#else
+constexpr TPCANHandle kLastUsbHandle = PCAN_USBBUS16;
+#endif
+constexpr int kUsbChannels = kLastUsbHandle - PCAN_USBBUS1 + 1;
+
 /// All channel handles we'll probe during enumerateAdapters().
-/// Covers USB (1..16), PCI (1..8), LAN (1..8). PCANBasic does define
-/// PCAN_PCIBUS9..16 and PCAN_LANBUS9..16 in current SDKs; extend the
-/// list here if you have a chassis that lights more than eight of
-/// either interface up.
+/// On non-macOS covers USB (1..16), PCI (1..8), LAN (1..8). PCANBasic
+/// does define PCAN_PCIBUS9..16 and PCAN_LANBUS9..16 in current SDKs;
+/// extend the list here if you have a chassis that lights more than
+/// eight of either interface up.
+/// On macOS the SDK is PCBUSB, which drives PCAN-USB devices only —
+/// PCAN_USBBUS9..16, PCAN_PCIBUS* and PCAN_LANBUS* are absent from its
+/// header, so the probe list shrinks to USB 1..8.
 constexpr TPCANHandle kProbeHandles[] = {
     PCAN_USBBUS1,  PCAN_USBBUS2,  PCAN_USBBUS3,  PCAN_USBBUS4,
     PCAN_USBBUS5,  PCAN_USBBUS6,  PCAN_USBBUS7,  PCAN_USBBUS8,
+#if !defined(__APPLE__)
     PCAN_USBBUS9,  PCAN_USBBUS10, PCAN_USBBUS11, PCAN_USBBUS12,
     PCAN_USBBUS13, PCAN_USBBUS14, PCAN_USBBUS15, PCAN_USBBUS16,
     PCAN_PCIBUS1,  PCAN_PCIBUS2,  PCAN_PCIBUS3,  PCAN_PCIBUS4,
     PCAN_PCIBUS5,  PCAN_PCIBUS6,  PCAN_PCIBUS7,  PCAN_PCIBUS8,
     PCAN_LANBUS1,  PCAN_LANBUS2,  PCAN_LANBUS3,  PCAN_LANBUS4,
     PCAN_LANBUS5,  PCAN_LANBUS6,  PCAN_LANBUS7,  PCAN_LANBUS8,
+#endif
 };
 
 std::string handleToChannelId(TPCANHandle h) {
@@ -48,12 +80,14 @@ std::string handleToChannelId(TPCANHandle h) {
     // PCAN_LANBUSn = 0x801 + (n-1). Encode in a stable string the user
     // can pass back to open(channel_id).
     std::ostringstream oss;
-    if (h >= PCAN_USBBUS1 && h <= PCAN_USBBUS16) {
+    if (h >= PCAN_USBBUS1 && h <= kLastUsbHandle) {
         oss << "PCAN_USBBUS" << (h - PCAN_USBBUS1 + 1);
+#if !defined(__APPLE__)  // PCI/LAN handles do not exist in PCBUSB.h
     } else if (h >= PCAN_PCIBUS1 && h <= PCAN_PCIBUS8) {
         oss << "PCAN_PCIBUS" << (h - PCAN_PCIBUS1 + 1);
     } else if (h >= PCAN_LANBUS1 && h <= PCAN_LANBUS8) {
         oss << "PCAN_LANBUS" << (h - PCAN_LANBUS1 + 1);
+#endif
     } else {
         oss << "PCAN_HANDLE_0x" << std::hex << h;
     }
@@ -70,13 +104,15 @@ TPCANHandle channelIdToHandle(const std::string& id) {
     };
     if (starts_with("PCAN_USBBUS")) {
         int n = idx("PCAN_USBBUS");
-        if (n >= 1 && n <= 16) return PCAN_USBBUS1 + (n - 1);
+        if (n >= 1 && n <= kUsbChannels) return PCAN_USBBUS1 + (n - 1);
+#if !defined(__APPLE__)  // PCI/LAN handles do not exist in PCBUSB.h
     } else if (starts_with("PCAN_PCIBUS")) {
         int n = idx("PCAN_PCIBUS");
         if (n >= 1 && n <= 8) return PCAN_PCIBUS1 + (n - 1);
     } else if (starts_with("PCAN_LANBUS")) {
         int n = idx("PCAN_LANBUS");
         if (n >= 1 && n <= 8) return PCAN_LANBUS1 + (n - 1);
+#endif
     }
     return 0;
 }
@@ -272,8 +308,9 @@ bool PcanBackend::open(const ChannelConfig& cfg) {
     }
     shutdown_event_handle_.store(shutdown_evt, std::memory_order_release);
 #else
-    // Linux: retrieve the receive event fd so callers (and select()) can
-    // wait without polling.
+    // Linux/macOS: retrieve the receive event fd so callers (and select())
+    // can wait without polling. Both libpcanbasic and PCBUSB return an
+    // int fd here.
     int fd = -1;
     if (CAN_GetValue(h, PCAN_RECEIVE_EVENT, &fd, sizeof(fd)) == PCAN_ERROR_OK) {
         receive_fd_.store(fd, std::memory_order_release);
@@ -281,14 +318,33 @@ bool PcanBackend::open(const ChannelConfig& cfg) {
         receive_fd_.store(-1, std::memory_order_release);
     }
 
-    // Sideband eventfd so close() can wake a blocked select() promptly.
+    // Sideband wakeup channel so close() can wake a blocked select()
+    // promptly. Linux uses an eventfd (one fd, readable and writable);
+    // macOS has no eventfd, so a non-blocking socketpair stands in:
+    // select() on the read end, close() writes a byte to the write end.
+#  ifdef __linux__
     int sevfd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (sevfd < 0) {
         recordError(std::string("eventfd(shutdown) failed: ") + std::strerror(errno));
         CAN_Uninitialize(h);
         return false;
     }
-    shutdown_eventfd_.store(sevfd, std::memory_order_release);
+    shutdown_read_fd_.store(sevfd, std::memory_order_release);
+    shutdown_write_fd_.store(sevfd, std::memory_order_release);
+#  else
+    int sv[2];
+    if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        recordError(std::string("socketpair(shutdown) failed: ") + std::strerror(errno));
+        CAN_Uninitialize(h);
+        return false;
+    }
+    ::fcntl(sv[0], F_SETFL, O_NONBLOCK);
+    ::fcntl(sv[1], F_SETFL, O_NONBLOCK);
+    ::fcntl(sv[0], F_SETFD, FD_CLOEXEC);
+    ::fcntl(sv[1], F_SETFD, FD_CLOEXEC);
+    shutdown_read_fd_.store(sv[0], std::memory_order_release);
+    shutdown_write_fd_.store(sv[1], std::memory_order_release);
+#  endif
 #endif
 
     // Release-store last so operational threads observing channel_handle_ != 0
@@ -316,10 +372,19 @@ void PcanBackend::close() {
         shutdown_event_handle_.exchange(nullptr, std::memory_order_acq_rel));
     if (shutdown_evt) SetEvent(shutdown_evt);
 #else
-    int shutdown_fd = shutdown_eventfd_.exchange(-1, std::memory_order_acq_rel);
-    if (shutdown_fd >= 0) {
+    const int shutdown_read_fd  = shutdown_read_fd_.exchange(-1, std::memory_order_acq_rel);
+    const int shutdown_write_fd = shutdown_write_fd_.exchange(-1, std::memory_order_acq_rel);
+    if (shutdown_write_fd >= 0) {
+        // eventfd requires an 8-byte host-endianness counter; the macOS
+        // socketpair accepts any write. A failed write still leaves the
+        // blocked select() to return when the fds close below.
+#  ifdef __linux__
         const uint64_t one = 1;
-        ssize_t w = ::write(shutdown_fd, &one, sizeof(one));
+        ssize_t w = ::write(shutdown_write_fd, &one, sizeof(one));
+#  else
+        const char one = 1;
+        ssize_t w = ::write(shutdown_write_fd, &one, sizeof(one));
+#  endif
         (void)w;
     }
 #endif
@@ -332,7 +397,11 @@ void PcanBackend::close() {
 #ifdef _WIN32
     if (shutdown_evt) CloseHandle(shutdown_evt);
 #else
-    if (shutdown_fd >= 0) ::close(shutdown_fd);
+    if (shutdown_read_fd >= 0) ::close(shutdown_read_fd);
+    // On Linux both names hold the same eventfd; close it once.
+    if (shutdown_write_fd >= 0 && shutdown_write_fd != shutdown_read_fd) {
+        ::close(shutdown_write_fd);
+    }
 #endif
 }
 
@@ -365,7 +434,9 @@ bool PcanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
 
     // Block on the platform-native event primitive multiplexed with our
     // shutdown sideband, so close() returns promptly without forcing the
-    // worker to wait out its receive() timeout. No polling.
+    // worker to wait out its receive() timeout. No polling. The select()
+    // path below serves both libpcanbasic (Linux) and PCBUSB (macOS),
+    // which hand out equivalent receive fds.
 #ifdef _WIN32
     HANDLE handle = static_cast<HANDLE>(receive_handle_.load(std::memory_order_acquire));
     HANDLE shutdown_evt = static_cast<HANDLE>(
@@ -400,7 +471,7 @@ bool PcanBackend::receive(Frame& frame, std::chrono::milliseconds timeout) {
     }
 #else
     int rfd  = receive_fd_.load(std::memory_order_acquire);
-    int sfd  = shutdown_eventfd_.load(std::memory_order_acquire);
+    int sfd  = shutdown_read_fd_.load(std::memory_order_acquire);
     if (rfd >= 0 && timeout.count() > 0) {
         // EINTR-retry loop so a signal landing on this thread (Qt apps
         // commonly install SIGCHLD handlers from QProcess) doesn't get
