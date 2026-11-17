@@ -107,12 +107,14 @@ from the corresponding `Find*.cmake` module.
 | Option                  | Default                | SDK required                 | Intended platform |
 |-------------------------|------------------------|------------------------------|-------------------|
 | `CAN_BACKEND_SOCKETCAN` | ON on Linux            | Linux kernel headers         | Linux             |
-| `CAN_BACKEND_PCAN`      | OFF                    | PEAK-System PCANBasic        | Windows           |
+| `CAN_BACKEND_PCAN`      | ON on macOS when PCBUSB installed, else OFF | PEAK-System PCANBasic / UV Software PCBUSB (macOS) | Windows / macOS   |
 | `CAN_BACKEND_KVASER`    | OFF                    | Kvaser canlib (kvlibsdk)     | Windows           |
 | `CAN_BACKEND_VECTOR`    | OFF (not implemented)  | n/a — fails configure if ON  | Windows           |
 
 The defaults reflect the intended deployment shape: **Linux uses
-SocketCAN against in-kernel drivers; Windows uses the vendor SDKs.**
+SocketCAN against in-kernel drivers; Windows uses the vendor SDKs;
+macOS has neither SocketCAN nor a PEAK driver, so PCAN hardware there
+is served by PCBUSB, auto-enabled when it is installed.**
 Enabling `CAN_BACKEND_PCAN` / `CAN_BACKEND_KVASER` on Linux is supported
 for cross-platform development and exotic-hardware fallbacks, but not
 how a Linux app should normally talk to PEAK or Kvaser hardware.

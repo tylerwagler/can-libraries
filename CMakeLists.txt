@@ -25,15 +25,31 @@ option(BUILD_TESTING "Build tests" ${_CANLIBS_TOPLEVEL})
 option(CANLIB_INSTALL "Install libraries and headers" ${_CANLIBS_TOPLEVEL})
 option(CANLIB_BUILD_EXAMPLES "Build can-libraries example apps" ${_CANLIBS_TOPLEVEL})
 
-# CAN backend options. Defaults: enable SocketCAN on Linux, attempt to
-# auto-enable PCAN if its SDK is found, leave Kvaser/Vector off until the
-# user opts in.
+# Add cmake/ to the module path before any find_package() below.
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+
+# CAN backend options. Defaults: enable SocketCAN on Linux; on macOS
+# auto-enable PCAN when its SDK (UV Software's PCBUSB) is installed;
+# leave Kvaser/Vector off until the user opts in.
 if(UNIX AND NOT APPLE)
     option(CAN_BACKEND_SOCKETCAN "Build SocketCAN backend (Linux)" ON)
 else()
     option(CAN_BACKEND_SOCKETCAN "Build SocketCAN backend (Linux)" OFF)
 endif()
-option(CAN_BACKEND_PCAN   "Build PCANBasic backend" OFF)
+# PCAN defaults ON on macOS only. PEAK ships no macOS driver at all, so
+# a mac build without this backend simply cannot open a PCAN channel —
+# it has to come in when the library is present. The probe is soft
+# (QUIET): a mac without PCBUSB installed (bare CI runners) still
+# configures with PCAN off. Windows and Linux keep the manual opt-in:
+# Linux deployment policy is SocketCAN (see README) and Windows dev
+# machines often have PEAK's SDK installed incidentally, where silently
+# linking it into every build would surprise.
+if(APPLE)
+    find_package(PCANBasic QUIET)
+    option(CAN_BACKEND_PCAN "Build PCANBasic backend" "${PCANBasic_FOUND}")
+else()
+    option(CAN_BACKEND_PCAN "Build PCANBasic backend" OFF)
+endif()
 option(CAN_BACKEND_KVASER "Build Kvaser canlib backend" OFF)
 option(CAN_BACKEND_VECTOR "Build Vector XL backend (NOT YET IMPLEMENTED)" OFF)
 # Vector XL Driver Library would land here, but the backend source
@@ -49,11 +65,9 @@ if(CAN_BACKEND_VECTOR)
         "(it is OFF by default) to proceed.")
 endif()
 
-# Add cmake/ to the module path so Find* modules are discoverable.
-list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
-
-# Resolve vendor SDKs for any backends the user opted into. We do this at
-# top level so the SDK-found state is available everywhere downstream.
+# Resolve vendor SDKs for any backends the user opted into (or that the
+# macOS default probed). We do this at top level so the SDK-found state is
+# available everywhere downstream.
 if(CAN_BACKEND_PCAN)
     find_package(PCANBasic REQUIRED)
 endif()
