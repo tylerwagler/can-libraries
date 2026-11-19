@@ -2,7 +2,7 @@
  * @file kvaser_backend.cpp
  * @brief Kvaser canlib backend implementation
  *
- * @copyright Copyright (c) 2026 Elytron Defense
+ * @copyright Copyright (c) 2026 Elytron Systems
  * @license GPL-3.0-or-later
  */
 

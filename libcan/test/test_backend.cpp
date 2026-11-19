@@ -7,7 +7,7 @@
  * open()/send()/receive() coverage lives in integration tests against
  * vcan0 (see backend_example).
  *
- * @copyright Copyright (c) 2026 Elytron Defense
+ * @copyright Copyright (c) 2026 Elytron Systems
  * @license GPL-3.0-or-later
  */
 

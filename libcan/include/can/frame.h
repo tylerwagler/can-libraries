@@ -2,7 +2,7 @@
  * @file frame.h
  * @brief CAN frame data structure
  *
- * @copyright Copyright (c) 2026 Elytron Defense
+ * @copyright Copyright (c) 2026 Elytron Systems
  * @license GPL-3.0-or-later
  */
 

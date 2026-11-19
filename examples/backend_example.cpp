@@ -7,7 +7,7 @@
  * stats cycle. Replaces the older can_example.cpp that targeted the
  * deleted can::Interface API.
  *
- * @copyright Copyright (c) 2026 Elytron Defense
+ * @copyright Copyright (c) 2026 Elytron Systems
  * @license GPL-3.0-or-later
  */
 

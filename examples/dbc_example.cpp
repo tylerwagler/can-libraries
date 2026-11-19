@@ -6,7 +6,7 @@
  * and signals, and prints a summary. Uses Tobias Lorenz's Vector_DBC
  * library (vendored at third_party/Vector_DBC).
  *
- * @copyright Copyright (c) 2026 Elytron Defense
+ * @copyright Copyright (c) 2026 Elytron Systems
  * @license GPL-3.0-or-later
  */
 

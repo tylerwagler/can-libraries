@@ -11,7 +11,7 @@
  * available — for example, on non-Linux hosts, or in CI environments
  * that lack the vcan kernel module.
  *
- * @copyright Copyright (c) 2026 Elytron Defense
+ * @copyright Copyright (c) 2026 Elytron Systems
  * @license GPL-3.0-or-later
  */
 

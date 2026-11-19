@@ -2,7 +2,7 @@
  * @file can_types.h
  * @brief Common constants and helpers for CAN identifier / bitrate handling
  *
- * @copyright Copyright (c) 2026 Elytron Defense
+ * @copyright Copyright (c) 2026 Elytron Systems
  * @license GPL-3.0-or-later
  */
 

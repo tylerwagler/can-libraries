@@ -9,7 +9,7 @@
  * code (Qt CanIoWorker, app code) holds a unique_ptr<ICanBackend> and is
  * otherwise unaware of which driver is in use.
  *
- * @copyright Copyright (c) 2026 Elytron Defense
+ * @copyright Copyright (c) 2026 Elytron Systems
  * @license GPL-3.0-or-later
  */
 
